@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+trap 'code=$?; echo "[deploy] FAILED at line $LINENO (exit $code): $BASH_COMMAND" >&2' ERR
+echo "[deploy] starting deployment"
 
 IMAGE="${1:-}"
 if [[ ! "$IMAGE" =~ ^ghcr\.io/argos-2026/backend:[0-9a-f]{40}$ ]]; then
@@ -13,9 +15,16 @@ if [[ ! -f compose.yaml || ! -f Caddyfile ]]; then
   exit 1
 fi
 
-# Caddy is configured only on EC2; do not replace the server's compose.yaml.
-docker compose config --services | grep -Fxq springboot
-docker compose config --services | grep -Fxq caddy
+# Capture Compose output fully before checking it: grep -q in a pipeline
+# can close stdout early and fail under pipefail.
+echo "[deploy] checking available Compose services"
+services="$(docker compose config --services)"
+for required in springboot caddy; do
+  if ! grep -Fxq "$required" <<< "$services"; then
+    echo "[deploy] missing service: $required" >&2
+    exit 1
+  fi
+done
 
 cat > compose.deploy.yaml <<'YAML'
 services:
@@ -24,9 +33,12 @@ services:
 YAML
 
 # If GHCR package is private, ec2-user must already be logged in to ghcr.io.
+echo "[deploy] pulling Docker image"
 docker pull "$IMAGE"
 export DEPLOY_IMAGE="$IMAGE"
+echo "[deploy] validating Compose override"
 docker compose -f compose.yaml -f compose.deploy.yaml config --quiet
+echo "[deploy] updating springboot (not caddy)"
 docker compose -f compose.yaml -f compose.deploy.yaml \
   up -d --no-deps --no-build --pull never springboot
 

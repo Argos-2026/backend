@@ -68,7 +68,7 @@ jobs:
           test -n "$INSTANCE_ID"
           image="ghcr.io/argos-2026/backend:${DEPLOY_SHA}"
           encoded="$(base64 -w 0 scripts/deploy-ec2.sh)"
-          command="printf '%s' '${encoded}' | base64 -d | sudo -u ec2-user bash -s -- '${image}'"
+          command="printf '%s' '${encoded}' | base64 -d | sudo -H -u ec2-user bash -s -- '${image}'"
           jq -n --arg cmd "$command" '{commands: [$cmd], executionTimeout: ["600"]}' > /tmp/argos-ssm.json
 
           command_id="$(aws ssm send-command \
