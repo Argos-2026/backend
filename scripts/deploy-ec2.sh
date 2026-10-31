@@ -10,8 +10,8 @@ if [[ ! "$IMAGE" =~ ^ghcr\.io/argos-2026/backend:[0-9a-f]{40}$ ]]; then
 fi
 
 cd /home/ec2-user/apps/backend
-if [[ ! -f compose.yaml || ! -f Caddyfile ]]; then
-  echo "Expected existing compose.yaml and Caddyfile in /home/ec2-user/apps/backend" >&2
+if [[ ! -f compose.yaml ]]; then
+  echo "Expected compose.yaml in /home/ec2-user/apps/backend" >&2
   exit 1
 fi
 
@@ -19,7 +19,7 @@ fi
 # can close stdout early and fail under pipefail.
 echo "[deploy] checking available Compose services"
 services="$(docker compose config --services)"
-for required in springboot caddy; do
+for required in springboot; do
   if ! grep -Fxq "$required" <<< "$services"; then
     echo "[deploy] missing service: $required" >&2
     exit 1
