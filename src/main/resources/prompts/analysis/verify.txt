@@ -1,8 +1,4 @@
-확보한 원문 근거만으로 주장별 사실 검증을 수행하세요. 각 claimId를 정확히 한 번 반환하세요.
-verdict는 SUPPORT/REFUTE/CONFLICT/INSUFFICIENT 중 하나입니다. SUPPORT는 근거가 직접 뒷받침, REFUTE는 직접 반박, CONFLICT는 유효한 지지·반박 근거가 상충, INSUFFICIENT는 판단할 근거가 부족한 경우입니다.
-reason에 주체·시기·수치·범위를 고려한 구체적 이유를 설명하세요. evidenceLinks에는 사용한 evidenceId와 SUPPORTS/REFUTES/CONTEXT 관계만 넣으세요. 주어진 주장에 연결된 근거만 사용하세요. 근거 없는 단정, 검색 실패를 진실 판정으로 대체하는 행동, 배경지식만 이용한 판정을 금지합니다.
-SUPPORT에는 SUPPORTS, REFUTE에는 REFUTES, CONFLICT에는 SUPPORTS와 REFUTES 근거가 모두 필요합니다. 근거가 전혀 없으면 INSUFFICIENT와 빈 evidenceLinks를 반환하세요.
-검증 대상은 claim.text 전체입니다. question이 더 좁거나 다른 대상을 묻더라도 text를 바꾸어 해석하지 마세요. targetMatched는 근거가 text의 주체·시기·범위와 발언 여부 등 전체 검증 대상을 직접 다루는지를 뜻합니다. 내용 일부만 확인했거나 발언 내용만 맞고 발언자는 확인하지 못했다면 false로 반환하고 verdict=INSUFFICIENT로 두세요. 관련 내용만 있는 근거의 stance는 CONTEXT입니다.
-kind=ATTRIBUTION이면 speaker가 '그 발언을 했는지'만 판단합니다. 발언 내용 자체가 사실이라는 자료로 발언 여부를 SUPPORT하지 마세요. 반대로 발언 내용이 거짓이라고 해서 그 사람이 그 말을 했다는 사실을 REFUTE하지 마세요.
-ATTRIBUTION을 SUPPORT/REFUTE/CONFLICT로 판정하려면 attributionQuotes에 evidenceId와 quote를 넣으세요. quote는 해당 문서 body에 실제로 존재하는 연속된 원문 최대 1000자이며, speaker의 명칭과 해당 발언 또는 발언 여부에 대한 명시적 부정을 함께 포함해야 합니다. 원자료를 인용한 다른 보도도 사용할 수 있으나 실제 발언자·내용을 명시해야 합니다. 원자료만 사용해야 한다는 뜻은 아닙니다.
-FACT의 attributionQuotes는 빈 배열입니다. 발언을 보여주는 근거가 없으면 ATTRIBUTION의 attributionQuotes도 빈 배열로 두고 INSUFFICIENT로 판정하세요. reason에서 '발언 자체는 확인하지 못했다'고 설명하면서 SUPPORT를 반환하면 안 됩니다.
+교차보도용 주장과 선정된 다른 언론사의 기사 원문을 비교하세요. 선정된 모든 evidenceId를 comparisons에 정확히 한 번씩 반환하세요.
+stance=MATCHES는 기사가 주장의 주체·시기·지역·수치 등 핵심 내용을 동일하게 보도한다는 뜻입니다. stance=CONTRADICTS는 같은 대상과 범위에 대해 명시적으로 다른 내용을 보도한다는 뜻입니다. 선정 단계에서 잘못 포함된 다른 대상·시기·지역의 보도는 UNRELATED로 표시하세요. 각 reason에 실제 비교 지점을 구체적으로 설명하세요.
+UNRELATED 자료는 최종 비교 기사에서 제외됩니다. 지어낸 일치·상반 판정을 만들지 마세요.
+보도가 일치해도 그 주장이 실제 사실이라고 확정하지 마세요. 이 분석은 언론사 간 보도 내용의 일치 여부만 다룹니다.

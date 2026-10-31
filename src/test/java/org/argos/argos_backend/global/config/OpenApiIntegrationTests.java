@@ -60,7 +60,7 @@ class OpenApiIntegrationTests {
         JsonNode doc = document();
         JsonNode result = resolve(doc.path("paths").path("/api/v1/analyses/{analysisId}/result").path("get")
             .path("responses").path("200").path("content").path("application/json").path("schema"), doc);
-        assertEquals(Set.of("analysisId", "status", "analysisOutcome", "article", "summary", "claims", "evidence", "articleSources", "warnings"), names(result.path("properties")));
+        assertEquals(Set.of("analysisId", "status", "article", "summary", "crossReports", "sourceAssessments", "evidence", "warnings"), names(result.path("properties")));
         JsonNode article = resolve(result.path("properties").path("article"), doc);
         assertFalse(article.path("properties").has("body"));
         JsonNode schemas = doc.path("components").path("schemas");

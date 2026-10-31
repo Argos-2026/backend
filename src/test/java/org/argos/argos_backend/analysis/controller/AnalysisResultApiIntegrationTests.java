@@ -51,32 +51,30 @@ class AnalysisResultApiIntegrationTests {
         assertTrue(first.headers().firstValue("Content-Type").orElseThrow().startsWith("application/json"));
         JsonNode result = json.readTree(first.body());
         Set<String> fields = new HashSet<>(); result.propertyNames().forEach(fields::add);
-        assertEquals(Set.of("analysisId", "status", "analysisOutcome", "article", "summary", "claims", "evidence", "articleSources", "warnings"), fields);
-        assertEquals("ANALYZED", result.path("analysisOutcome").asString());
+        assertEquals(Set.of("analysisId", "status", "article", "summary", "crossReports", "sourceAssessments", "evidence", "warnings"), fields);
         assertTrue(result.path("article").path("author").isNull());
         assertTrue(result.path("article").path("publishedAt").isNull());
         assertFalse(result.path("article").has("body"));
         assertFalse(result.has("articleUrl"));
         assertFalse(result.has("createdAt"));
         assertFalse(result.has("activeStages"));
-        assertEquals("evidence-1", result.path("claims").get(0).path("evidenceLinks").get(0).path("evidenceId").asString());
-        assertEquals("source-1", result.path("claims").get(0).path("articleSourceIds").get(0).asString());
-        assertEquals(6, result.path("articleSources").get(0).path("imvain").size());
+        assertEquals("evidence-1", result.path("crossReports").get(0).path("comparisons").get(0).path("evidenceId").asString());
+        assertEquals("source-1-1", result.path("sourceAssessments").get(0).path("sources").get(0).path("sourceId").asString());
+        assertEquals(6, result.path("sourceAssessments").get(0).path("sources").get(0).path("imvain").size());
         assertEquals("확인한 원문 문장입니다.", result.path("evidence").get(0).path("excerpt").asString());
         verifyNoInteractions(pipeline);
     }
 
-    @Test void partialResultPreservesClaimsAndNullFailedSourceAssessment() throws Exception {
+    @Test void partialResultPreservesReportsAndFailedSourceAssessment() throws Exception {
         AnalysisJob job = complete(true);
         var response = get(job.id().toString());
         assertEquals(200, response.statusCode());
         JsonNode result = json.readTree(response.body());
         assertEquals("PARTIAL_COMPLETED", result.path("status").asString());
-        assertTrue(result.has("articleSources"));
-        assertTrue(result.path("articleSources").isNull());
-        assertTrue(result.path("summary").has("sourceAssessmentOverview"));
-        assertTrue(result.path("summary").path("sourceAssessmentOverview").isNull());
-        assertTrue(result.path("claims").get(0).path("articleSourceIds").isEmpty());
+        assertEquals("MATCHED", result.path("crossReports").get(0).path("verdict").asString());
+        assertTrue(result.path("sourceAssessments").get(0).path("sources").get(0).path("assessmentFailed").asBoolean());
+        assertEquals("UNKNOWN", result.path("sourceAssessments").get(0).path("sources").get(0)
+            .path("imvain").path("verify").path("status").asString());
         assertEquals("SOURCE_ASSESSMENT_FAILED", result.path("warnings").get(0).path("code").asString());
     }
 
@@ -84,8 +82,7 @@ class AnalysisResultApiIntegrationTests {
         AnalysisJob job = store.create("https://example.com/article");
         job.start(); job.complete(emptyResult(job.id(), Status.COMPLETED));
         JsonNode result = json.readTree(get(job.id().toString()).body());
-        assertEquals("NO_VERIFIABLE_CLAIMS", result.path("analysisOutcome").asString());
-        for (String field : List.of("claims", "evidence", "articleSources", "warnings")) {
+        for (String field : List.of("crossReports", "evidence", "sourceAssessments", "warnings")) {
             assertTrue(result.path(field).isArray()); assertTrue(result.path(field).isEmpty());
         }
     }
@@ -174,12 +171,17 @@ class AnalysisResultApiIntegrationTests {
         job.start();
         Criterion criterion = new Criterion(CriterionStatus.MET, "원문에서 확인했습니다.", List.of("evidence-1"));
         Map<String, Criterion> criteria = new LinkedHashMap<>(); CRITERIA.forEach(key -> criteria.put(key, criterion));
-        job.complete(new Result(job.id(), partial ? Status.PARTIAL_COMPLETED : Status.COMPLETED, "ANALYZED",
+        job.complete(new Result(job.id(), partial ? Status.PARTIAL_COMPLETED : Status.COMPLETED,
             new Article("https://example.com/article", "기사 제목", "언론사", null, null),
-            new Summary("종합 코멘트", "판정 요약", partial ? null : "정보원 요약", List.of()),
-            List.of(new Claim("claim-1", "검증 대상 주장", Verdict.SUPPORT, "확인한 근거가 뒷받침합니다.", partial ? List.of() : List.of("source-1"), List.of(new EvidenceLink("evidence-1", Stance.SUPPORTS)))),
+            new Summary("종합 코멘트", "교차보도 요약", "정보원 요약", List.of()),
+            List.of(new CrossReport("report-1", "검증 대상 주장", ReportVerdict.MATCHED, "다른 언론사도 보도했습니다.",
+                1, 0, List.of(new ReportComparison("evidence-1", ReportStance.MATCHES, "내용이 같습니다.")), false)),
+            List.of(new SourceAssessment("source-claim-1", "정보원 포함 주장",
+                List.of(new ReviewedSource("source-1-1", "정보원", "기관", SourceType.ORGANIZATION,
+                    "기사 내 인용", partial ? "평가 실패" : "확인 결과",
+                    partial ? CRITERIA.stream().collect(java.util.stream.Collectors.toMap(k -> k,
+                        k -> new Criterion(CriterionStatus.UNKNOWN, "평가 실패", List.of()))) : Map.copyOf(criteria), partial)))),
             List.of(new Evidence("evidence-1", "근거 제목", "발행 기관", "https://docs.example.com/a", null, "확인한 원문 문장입니다.")),
-            partial ? null : List.of(new ArticleSource("source-1", "정보원", SourceType.ORGANIZATION, "기사 내 인용", "확인 결과", Map.copyOf(criteria))),
             partial ? List.of(new Issue("SOURCE_ASSESSMENT_FAILED", Stage.ASSESSING_SOURCES, "평가 실패")) : List.of()));
         return job;
     }

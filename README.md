@@ -1,6 +1,6 @@
 # ARGOS Backend
 
-뉴스 URL에서 핵심 주장 최대 3개를 추출하고, 외부 원문으로 사실 검증과 기사 내부 정보원의 IMVAIN 6개 기준 평가를 수행하는 Spring Boot 백엔드입니다.
+뉴스 URL에서 교차보도용 핵심 주장과 정보원 평가용 주장을 각각 최대 3개 선정하고, 다른 언론사의 보도 일치 여부와 기사 내부 정보원의 IMVAIN 6개 기준을 분석하는 Spring Boot 백엔드입니다.
 
 **분석 요청·전체 비동기 분석 처리·상태 조회·결과 조회의 3단계 구현을 완료했습니다.** 작업 상태·결과는 메모리에 저장합니다. 실제 서비스 인증과 분석 품질은 API 키 설정 후 확인해야 합니다.
 
@@ -197,17 +197,39 @@ $result | ConvertTo-Json -Depth 20
 | 결과 필드 | 내용 |
 |---|---|
 | `analysisId`, `status` | 분석 ID와 완료·부분 완료 상태 |
-| `analysisOutcome` | `ANALYZED` 또는 `NO_VERIFIABLE_CLAIMS` |
 | `article` | 제목·원문 URL·언론사·작성자·발행 시각 |
-| `summary` | 종합 코멘트·사실 검증 요약·정보원 평가 요약·미확인 내용 |
-| `claims` | 주장별 판정·이유·연결 근거·기사 내부 정보원 ID |
-| `evidence` | 원문 제목·발행 기관·URL·발행 시각·검증에 사용한 발췌 |
-| `articleSources` | 기사 내부 정보원별 인용 문장과 IMVAIN 6개 항목·이유·근거 ID |
+| `summary` | 종합 코멘트·교차보도 요약·정보원 평가 요약·미확인 내용 |
+| `crossReports` | 교차보도용 주장별 판정·일치/상반 건수·비교 기사와 이유 |
+| `sourceAssessments` | 정보원용 주장별 인용 정보원과 IMVAIN 평가 |
+| `evidence` | 비교 기사와 외부 자료의 제목·언론사·URL·발행 시각·원문 발췌 |
 | `warnings` | 부분 실패의 코드·단계·설명 |
 
-정보원 평가 실패 시 `articleSources`와 `summary.sourceAssessmentOverview`는 `null`입니다. 평가를 성공적으로 수행했지만 정보원을 찾지 못한 경우에는 `articleSources=[]`입니다. 검증 가능한 주장이 없으면 `claims=[]`와 `NO_VERIFIABLE_CLAIMS`를 반환합니다.
+두 목록은 같은 기사에서 목적에 맞게 독립적으로 선정하며 각각 최대 3개입니다. 같은 주장이 두 목록에 들어갈 수 있습니다. 선정할 주장이 없으면 해당 목록은 `[]`입니다. 교차보도 결과는 `MATCHED`(일치), `CONTRADICTED`(상반), `MIXED`(혼재), `UNCONFIRMED`(확인 불가)입니다. 일치 보도는 실제 사실의 확정을 의미하지 않습니다. 개별 검색·평가 실패는 `analysisFailed`·`assessmentFailed`와 `warnings`로 근거 부족에 따른 확인 불가와 구별합니다.
 
-주장·정보원 카드의 근거는 `evidenceId`로 `evidence[]`와 연결합니다. 원문 보기에는 근거의 `url`을 사용하고, 정보원 카드의 근거 목록은 IMVAIN 6개 항목의 `evidenceIds`를 중복 제거해 표시합니다. 판정별 개수와 기준별 충족·미충족·확인 불가 개수는 배열에서 계산할 수 있습니다. 권위성과 정보성은 각각 표시하며 합산 신뢰도 점수는 제공하지 않습니다.
+교차보도 비교의 `evidenceId`와 정보원 기준별 `evidenceIds`는 `evidence[]`와 연결합니다. 정보원 카드의 근거 목록은 6개 항목의 ID를 중복 제거해 표시합니다. IMVAIN은 항목별 `MET`·`NOT_MET`·`UNKNOWN`만 제공하며 합산 신뢰도 점수는 제공하지 않습니다.
+
+결과 예시(필드 일부 생략):
+
+```json
+{
+  "status": "COMPLETED",
+  "crossReports": [{
+    "claimId": "report-1", "text": "새빛시 복지 예산이 12% 감소한다.",
+    "verdict": "MATCHED", "matchingCount": 1, "contradictingCount": 0,
+    "comparisons": [{"evidenceId": "evidence-1", "stance": "MATCHES", "reason": "감소율이 같습니다."}],
+    "analysisFailed": false
+  }],
+  "sourceAssessments": [{
+    "claimId": "source-claim-1", "text": "정보원이 뒷받침한 주장",
+    "sources": [{"sourceId": "source-1-1", "name": "새빛시청", "affiliation": "",
+      "citedInArticle": "기사 속 인용문", "assessmentFailed": false,
+      "imvain": {"named": {"status": "MET", "reason": "기관명이 명시됐습니다.", "evidenceIds": []}}}]
+  }],
+  "evidence": [{"evidenceId": "evidence-1", "publisher": "다른일보",
+    "url": "https://example.com/report", "excerpt": "비교한 원문 문장"}],
+  "warnings": []
+}
+```
 
 결과 조회는 저장된 결과만 읽으며 검색·LLM을 다시 호출하지 않습니다. 기사 전문과 API 키는 응답에 포함하지 않고, 성공·API 오류 응답에 `Cache-Control: no-store`를 적용합니다.
 
@@ -263,18 +285,17 @@ CORS_ALLOWED_ORIGINS=https://frontend.example.com,https://admin.example.com
 ## 분석 동작
 
 1. 기사 HTML 수집·정규화: 제목·언론사·작성자·발행 시각·본문 추출
-2. LLM으로 핵심 주장·검증 질문·검색어와 주요 내부 정보원 추출
-3. NAVER API HUB·Brave 검색, 외부 HTML·텍스트 PDF 원문 수집, 중복 제거
-4. 주장별 근거 선별·인용문 확인
-5. `SUPPORT / REFUTE / CONFLICT / INSUFFICIENT` 판정
-6. 정보원 외부 확인과 IMVAIN 6개 항목 평가
-7. 종합 요약·근거·정보원 평가·경고 통합 및 메모리 저장
+2. AI 호출 한 번으로 교차보도용 주장 최대 3개와 정보원 포함 주장 최대 3개를 독립적으로 추출
+3. 교차보도 주장마다 정확·확장 검색어를 NAVER API HUB·Brave에 보내고, 고유 URL 최대 10개 수집 시도
+4. 다른 언론사의 관련 기사 최대 5개를 비교해 일치·상반·혼재·확인 불가 판정
+5. 정보원마다 Brave 검색어 2개로 원문을 찾고, 관련 외부 자료 최대 3개를 사용해 주장별 IMVAIN 평가
+6. 종합 요약·근거·경고 통합 및 메모리 저장
 
 프롬프트는 `src/main/resources/prompts/analysis/`에 단계별로 있습니다. LLM 출력에는 닫힌 JSON Schema를 적용하고, ID·인용 원문·판정에 필요한 근거 관계를 다시 검사합니다. 모델의 의미적 판단 정확성은 실제 기사·공식 자료로 추가 평가해야 합니다.
 
-검색 API 호출 자체가 실패한 경우와 정상 검색 후 근거가 부족한 경우를 구분합니다. 정상적인 근거 부족과 주장 0개는 작업 실패가 아닙니다. 사용 가능한 판정은 있으나 검색 일부 또는 정보원 평가 등이 실패하면 부분 완료를 기록합니다.
+검색 API 호출 실패와 정상 검색 후 근거 부족을 구분합니다. 정상적인 근거 부족과 주장 0개는 작업 실패가 아닙니다. 한 검색 제공자나 정보원 평가가 실패해도 다른 결과를 보존하고 `PARTIAL_COMPLETED`와 경고를 기록합니다. 사용 가능한 결과가 없으면 `FAILED`입니다.
 
-발언 검증에서는 **발언을 했다는 사실**과 **발언 내용 자체의 사실 여부**를 나눕니다. 예를 들어 `김민수가 예산이 30% 줄었다고 말했다`는 실제 감소율 자료만으로 뒷받침할 수 없습니다. 추출·검색·선별·판정 단계에서 같은 검증 대상을 유지하고, 발언자를 명시한 원문 인용을 검사합니다. 발언 근거가 없거나 전체 주장을 확인하지 못하면 `INSUFFICIENT`로 반환하고 관련 내용 자료는 `CONTEXT`로 연결합니다. 내부 검증용 분류·인용 필드는 공개 응답에 추가하지 않습니다. 이 과정에도 AI의 의미적 판단이 포함되므로 실제 기사로 품질을 확인해야 합니다.
+교차보도 분석은 다른 언론사가 같은 내용을 보도했는지를 판단합니다. 원본 기사와 같은 언론사의 기사, 전재·중복 기사, 다른 사건의 기사는 제외합니다. IMVAIN 분석은 기사에서 실제 근거로 인용한 정보원이 해당 주장에 신뢰할 만한지를 별도로 판단합니다. 의미적 비교에는 AI 판단이 포함되므로 실제 기사로 품질을 추가 확인해야 합니다.
 
 ## 기본 제한과 운영 전 확인
 
@@ -287,7 +308,8 @@ CORS_ALLOWED_ORIGINS=https://frontend.example.com,https://admin.example.com
 | 외부 문서 / OpenAI 요청 제한시간 | 15초 / 60초 |
 | 문서 다운로드 / 분석 본문 | 문서당 5MB / 30,000자 |
 | PDF 처리 | 텍스트 추출 가능한 PDF 앞 50페이지, OCR 제외 |
-| 주장 / 주요 정보원 | 최대 3개 / 최대 6개 |
+| 교차보도용 / IMVAIN용 주장 | 각각 최대 3개 |
+| 비교 기사 / 정보원별 외부 자료 | 주장당 최대 5개 / 정보원당 최대 3개 |
 
 작업 수·시간은 `.env.example`의 `ANALYSIS_*` 값으로 조정할 수 있습니다. 작업 실행 제한시간은 보관 기한보다 짧아야 합니다. 로컬 메모리 방식이므로 단일 인스턴스를 전제로 합니다.
 

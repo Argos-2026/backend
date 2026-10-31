@@ -17,7 +17,7 @@ public final class AnalysisFixtures {
     public static Result emptyResult(UUID id) { return emptyResult(id, Status.COMPLETED); }
 
     public static Result emptyResult(UUID id, Status status) {
-        return new Result(id, status, "NO_VERIFIABLE_CLAIMS", new Article("private-result", "제목", null, null, null),
+        return new Result(id, status, new Article("private-result", "제목", null, null, null),
             new Summary("검증할 주장 없음", "없음", "정보원 없음", List.of()), List.of(), List.of(), List.of(),
             status == Status.PARTIAL_COMPLETED ? List.of(new Issue("SOURCE_ASSESSMENT_FAILED", Stage.ASSESSING_SOURCES, "정보원 평가 실패")) : List.of());
     }

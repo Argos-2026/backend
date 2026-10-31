@@ -11,7 +11,7 @@ public final class AnalysisContext {
     private final Instant deadline;
     private final Consumer<Stage> stageListener;
     private final List<Issue> warnings = new ArrayList<>();
-    private Stage stage = Stage.FETCHING_ARTICLE;
+    private volatile Stage stage = Stage.FETCHING_ARTICLE;
     public AnalysisContext(Clock clock, Instant deadline, Consumer<Stage> stageListener) {
         this.clock = clock; this.deadline = deadline; this.stageListener = stageListener;
     }
@@ -24,8 +24,9 @@ public final class AnalysisContext {
         Duration remaining = Duration.between(clock.instant(), deadline);
         return remaining.compareTo(max) < 0 ? remaining : max;
     }
+    public Duration remaining() { return Duration.between(clock.instant(), deadline); }
     public void stage(Stage value) { check(); stage = value; stageListener.accept(value); }
     public Stage stage() { return stage; }
-    public void warn(Issue warning) { if (!warnings.contains(warning)) warnings.add(warning); }
-    public List<Issue> warnings() { return List.copyOf(warnings); }
+    public synchronized void warn(Issue warning) { if (!warnings.contains(warning)) warnings.add(warning); }
+    public synchronized List<Issue> warnings() { return List.copyOf(warnings); }
 }

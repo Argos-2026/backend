@@ -1,7 +1,10 @@
 package org.argos.argos_backend.analysis.service;
 
+import jakarta.annotation.PreDestroy;
 import java.net.URI;
+import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import org.argos.argos_backend.analysis.domain.AnalysisContext;
@@ -25,6 +28,9 @@ public class AnalysisPipeline {
     private final StructuredLlm llm;
     private final SafeUrlPolicy urls;
     private final JsonMapper json;
+    private final ExecutorService searches = Executors.newFixedThreadPool(8,
+        Thread.ofPlatform().name("argos-search-", 0).daemon().factory());
+
     public AnalysisPipeline(DocumentFetcher fetcher, SearchClient search, StructuredLlm llm, SafeUrlPolicy urls, JsonMapper json) {
         this.fetcher = fetcher; this.search = search; this.llm = llm; this.urls = urls; this.json = json;
     }
@@ -33,123 +39,201 @@ public class AnalysisPipeline {
         context.stage(Stage.FETCHING_ARTICLE);
         Document article = fetcher.fetch(url, true, context);
         context.stage(Stage.EXTRACTING_CLAIMS);
-        Extraction extracted = generate("extract", Map.of("article", article), Extraction.class,
-            x -> validateExtraction(x, article.body()), context);
-        var pool = new EvidencePool(article);
-        Map<String, List<String>> candidates = new LinkedHashMap<>();
-        context.stage(Stage.RETRIEVING_EVIDENCE);
-        for (int i = 0; i < extracted.claims().size(); i++) {
-            List<SearchClient.Hit> hits = new ArrayList<>();
-            int succeeded = 0;
-            for (String query : extracted.claims().get(i).queries()) for (var provider : SearchClient.Provider.values()) {
-                try { hits.addAll(search.search(provider, query, 5, context)); succeeded++; }
-                catch (AnalysisFailure e) { context.check(); context.warn(new Issue("SEARCH_FAILED", context.stage(), "일부 검색 제공자 요청이 실패했습니다.")); }
-            }
-            if (succeeded == 0) throw new AnalysisFailure("SEARCH_FAILED", "외부 검색을 수행하지 못했습니다.");
-            candidates.put(claimId(i), collect(hits, 5, pool, context, false));
-        }
-
-        context.stage(Stage.SELECTING_EVIDENCE);
-        Selection selection = extracted.claims().isEmpty() ? new Selection(List.of()) : generate("select",
-            Map.of("claims", claimInputs(extracted), "candidates", candidateInputs(candidates, pool)), Selection.class,
-            s -> validateSelection(s, candidates, pool), context);
-        Map<String, List<String>> allowed = new LinkedHashMap<>();
-        for (SelectedClaim selected : selection.claims()) {
-            allowed.put(selected.claimId(), selected.evidence().stream().map(Quote::evidenceId).toList());
-            for (Quote quote : selected.evidence()) pool.quote(quote.evidenceId(), quote.quote());
-        }
-
-        context.stage(Stage.VERIFYING_CLAIMS);
-        boolean noEvidence = allowed.values().stream().allMatch(List::isEmpty);
-        Verification verified;
-        if (noEvidence) {
-            List<VerifiedClaim> insufficient = new ArrayList<>();
-            for (int i = 0; i < extracted.claims().size(); i++) insufficient.add(new VerifiedClaim(claimId(i), Verdict.INSUFFICIENT,
-                "검색한 자료에서 판단에 충분한 원문 근거를 확보하지 못했습니다.", List.of(), false, List.of()));
-            verified = new Verification(List.copyOf(insufficient));
-        } else verified = generate("verify", Map.of("claims", claimInputs(extracted), "evidence", selectedInputs(allowed, pool)),
-            Verification.class, v -> validateVerification(v, allowed, pool), context);
-        verified = new Verification(verified.claims().stream()
-            .map(v -> ClaimVerificationGuard.enforce(extracted.claims().get(index(v.claimId())), v)).toList());
-        for (VerifiedClaim claim : verified.claims()) {
-            for (Quote quote : claim.attributionQuotes()) pool.quote(quote.evidenceId(), quote.quote());
-        }
-
-        context.stage(Stage.ASSESSING_SOURCES);
-        List<ArticleSource> sources = null;
-        try {
-            Map<String, List<String>> sourceEvidence = new LinkedHashMap<>();
-            for (int i = 0; i < extracted.sources().size(); i++) {
-                DraftSource source = extracted.sources().get(i);
-                List<String> sourceDocs = List.of();
-                if (source.identifiable()) {
-                    try {
-                        sourceDocs = collect(search.search(SearchClient.Provider.BRAVE,
-                            source.name() + " " + extracted.claims().stream().findFirst().map(DraftClaim::question).orElse("소속 공식 자료"),
-                            3, context), 3, pool, context, true);
-                    } catch (AnalysisFailure e) {
-                        context.check();
-                        throw new AnalysisFailure("SOURCE_ASSESSMENT_FAILED", "정보원 외부 확인을 완료하지 못했습니다.");
-                    }
-                }
-                sourceEvidence.put(sourceId(i), sourceDocs);
-            }
-            Assessment assessment = extracted.sources().isEmpty() ? new Assessment(List.of()) : generate("assess",
-                Map.of("article", article, "claims", claimInputs(extracted), "sources", sourceInputs(extracted),
-                    "externalDocuments", candidateInputs(sourceEvidence, pool)), Assessment.class,
-                a -> validateAssessment(a, extracted, sourceEvidence, pool), context);
-            sources = new ArrayList<>();
-            for (SourceReview review : assessment.sources()) {
-                DraftSource source = extracted.sources().get(index(review.sourceId()));
-                for (Quote quote : review.evidence()) pool.quote(quote.evidenceId(), quote.quote());
-                sources.add(new ArticleSource(review.sourceId(), source.name(), source.type(), source.citedInArticle(), review.verificationNote(), review.imvain().asMap()));
-            }
-            sources = List.copyOf(sources);
-        } catch (AnalysisFailure e) {
+        Extraction extraction = generate("extract", Map.of("article", article), Extraction.class,
+            value -> validateExtraction(value, article), context);
+        EvidencePool pool = new EvidencePool(article);
+        List<CrossReport> crossReports = new ArrayList<>();
+        for (int i = 0; i < extraction.crossReportClaims().size(); i++) {
             context.check();
-            context.warn(new Issue("SOURCE_ASSESSMENT_FAILED", Stage.ASSESSING_SOURCES, "정보원 평가를 완료하지 못했습니다. 사실 검증 결과는 확인할 수 있습니다."));
+            DraftCrossClaim draft = extraction.crossReportClaims().get(i);
+            if (nearDeadline(context) && crossReports.stream().anyMatch(r -> !r.analysisFailed())) {
+                context.warn(new Issue("ANALYSIS_TIMEOUT", Stage.RETRIEVING_EVIDENCE,
+                    "남은 실행시간이 부족해 일부 교차보도 분석을 생략했습니다."));
+                crossReports.add(new CrossReport(reportId(i), draft.text(), ReportVerdict.UNCONFIRMED,
+                    "실행시간 제한으로 비교를 완료하지 못했습니다.", 0, 0, List.of(), true));
+                continue;
+            }
+            try {
+                crossReports.add(analyzeReport(reportId(i), draft, pool, context));
+            } catch (AnalysisFailure e) {
+                context.check();
+                context.warn(new Issue(e.code().equals("ANALYSIS_TIMEOUT") ? "ANALYSIS_TIMEOUT" : "CROSS_REPORT_FAILED",
+                    context.stage(), "일부 교차보도 분석을 완료하지 못했습니다."));
+                crossReports.add(new CrossReport(reportId(i), draft.text(), ReportVerdict.UNCONFIRMED,
+                    "외부 검색 또는 비교 처리에 실패하여 확인하지 못했습니다.", 0, 0, List.of(), true));
+            }
         }
 
-        List<Claim> claims = new ArrayList<>();
-        for (VerifiedClaim v : verified.claims()) {
-            List<String> linkedSources = new ArrayList<>();
-            if (sources != null) for (int s = 0; s < extracted.sources().size(); s++)
-                if (extracted.sources().get(s).claimIndexes().contains(index(v.claimId()))) linkedSources.add(sourceId(s));
-            claims.add(new Claim(v.claimId(), extracted.claims().get(index(v.claimId())).text(), v.verdict(), v.reason(), List.copyOf(linkedSources), v.evidenceLinks()));
+        List<SourceAssessment> sourceAssessments = new ArrayList<>();
+        for (int i = 0; i < extraction.sourceClaims().size(); i++) {
+            context.check();
+            DraftSourceClaim claim = extraction.sourceClaims().get(i);
+            List<ReviewedSource> reviewed = new ArrayList<>();
+            for (int j = 0; j < claim.sources().size(); j++) {
+                context.check();
+                DraftSource source = claim.sources().get(j);
+                if (nearDeadline(context) && (crossReports.stream().anyMatch(r -> !r.analysisFailed())
+                    || sourceAssessments.stream().flatMap(a -> a.sources().stream()).anyMatch(s -> !s.assessmentFailed())
+                    || reviewed.stream().anyMatch(s -> !s.assessmentFailed()))) {
+                    context.warn(new Issue("ANALYSIS_TIMEOUT", Stage.ASSESSING_SOURCES,
+                        "남은 실행시간이 부족해 일부 정보원 평가를 생략했습니다."));
+                    reviewed.add(failedSource(sourceId(i, j), source));
+                    continue;
+                }
+                try {
+                    reviewed.add(assessSource(sourceId(i, j), claim, source, pool, context));
+                } catch (AnalysisFailure e) {
+                    context.check();
+                    context.warn(new Issue(e.code().equals("ANALYSIS_TIMEOUT") ? "ANALYSIS_TIMEOUT" : "SOURCE_ASSESSMENT_FAILED",
+                        Stage.ASSESSING_SOURCES,
+                        "일부 정보원 평가를 완료하지 못했습니다."));
+                    reviewed.add(failedSource(sourceId(i, j), source));
+                }
+            }
+            sourceAssessments.add(new SourceAssessment(sourceClaimId(i), claim.text(), List.copyOf(reviewed)));
         }
+
+        boolean anyUseful = crossReports.stream().anyMatch(r -> !r.analysisFailed())
+            || sourceAssessments.stream().flatMap(a -> a.sources().stream()).anyMatch(s -> !s.assessmentFailed());
+        if (!anyUseful && (!crossReports.isEmpty() || !sourceAssessments.isEmpty()))
+            throw new AnalysisFailure("ANALYSIS_FAILED", "사용 가능한 교차보도 또는 정보원 평가 결과를 생성하지 못했습니다.");
+
         context.stage(Stage.AGGREGATING_RESULT);
         List<String> limitations = new ArrayList<>();
-        if (article.truncated()) limitations.add("기사가 길어 정제 본문 앞부분 30,000자만 분석했습니다.");
-        if (pool.documents.values().stream().anyMatch(Document::truncated)) limitations.add("일부 외부 자료는 본문 30,000자 또는 PDF 앞 50페이지 범위에서 확인했습니다.");
-        if (extracted.sourcesTruncated()) limitations.add("기사 내부 주요 정보원 최대 6개를 선정해 평가했습니다.");
+        if (article.truncated()) limitations.add("기사 본문 앞부분 30,000자만 분석했습니다.");
+        if (pool.documents.values().stream().anyMatch(Document::truncated))
+            limitations.add("일부 외부 자료는 본문 30,000자 또는 PDF 앞 50페이지 범위에서 확인했습니다.");
         Summary summary;
         try {
+            if (nearDeadline(context)) throw new AnalysisFailure("LLM_FAILED", "종합 요약을 생성할 시간이 부족합니다.");
             var input = new LinkedHashMap<String, Object>();
-            input.put("claims", claims); input.put("articleSources", sources); input.put("limitations", limitations); input.put("warnings", context.warnings());
+            input.put("crossReports", crossReports);
+            input.put("sourceAssessments", sourceAssessments);
+            input.put("limitations", limitations);
+            input.put("warnings", context.warnings());
             OverallSummary generated = generate("summarize", input, OverallSummary.class, this::validateSummary, context);
             List<String> points = new ArrayList<>(generated.unverifiedPoints());
             for (String limitation : limitations) if (!points.contains(limitation)) points.add(limitation);
-            summary = new Summary(generated.overallComment(), generated.factCheckOverview(), sources == null ? null : generated.sourceAssessmentOverview(), List.copyOf(points));
+            summary = new Summary(generated.overallComment(), generated.crossReportOverview(),
+                generated.sourceAssessmentOverview(), List.copyOf(points));
         } catch (AnalysisFailure e) {
             context.check();
-            context.warn(new Issue("LLM_FAILED", Stage.AGGREGATING_RESULT, "종합 요약 생성에 실패하여 주장별 결과로 기본 요약을 구성했습니다."));
-            summary = new Summary(claims.isEmpty() ? "검증 가능한 핵심 주장을 찾지 못했습니다." : "주장별 검증 결과와 원문 근거를 확인해 주세요.",
-                claims.stream().map(c -> c.text() + ": " + c.verdict() + " — " + c.reason()).collect(Collectors.joining("\n")),
-                sources == null ? null : "기사 내부 정보원 " + sources.size() + "개를 개별 기준으로 평가했습니다.", List.copyOf(limitations));
+            context.warn(new Issue("LLM_FAILED", Stage.AGGREGATING_RESULT, "종합 요약 생성에 실패해 기본 요약을 사용했습니다."));
+            summary = new Summary("각 분석 결과와 근거를 확인해 주세요.",
+                crossReports.stream().map(r -> r.text() + ": " + r.verdict()).collect(Collectors.joining("\n")),
+                "정보원 포함 주장 " + sourceAssessments.size() + "개를 평가했습니다.", List.copyOf(limitations));
         }
         context.check();
         Status status = context.warnings().isEmpty() ? Status.COMPLETED : Status.PARTIAL_COMPLETED;
-        return new Result(id, status, claims.isEmpty() ? "NO_VERIFIABLE_CLAIMS" : "ANALYZED", article.article(), summary,
-            List.copyOf(claims), pool.usedEvidence(claims, sources), sources, context.warnings());
+        return new Result(id, status, article.article(), summary, List.copyOf(crossReports),
+            List.copyOf(sourceAssessments), pool.usedEvidence(crossReports, sourceAssessments), context.warnings());
     }
 
-    private List<String> collect(List<SearchClient.Hit> hits, int limit, EvidencePool pool, AnalysisContext context, boolean source) {
+    private CrossReport analyzeReport(String id, DraftCrossClaim claim, EvidencePool pool, AnalysisContext context) {
+        context.stage(Stage.RETRIEVING_EVIDENCE);
+        List<SearchRequest> requests = List.of(
+            new SearchRequest(SearchClient.Provider.NAVER, claim.exactQuery()),
+            new SearchRequest(SearchClient.Provider.BRAVE, claim.exactQuery()),
+            new SearchRequest(SearchClient.Provider.NAVER, claim.expandedQuery()),
+            new SearchRequest(SearchClient.Provider.BRAVE, claim.expandedQuery()));
+        List<SearchClient.Hit> hits = searchAll(requests, context);
+        List<String> candidates = collect(hits, 10, 10, pool, context, true);
+        if (candidates.isEmpty()) return unconfirmed(id, claim.text(), "다른 언론사의 관련 기사 원문을 확보하지 못했습니다.");
+        context.stage(Stage.SELECTING_EVIDENCE);
+        ReportSelection selected = generate("select", Map.of("claim", claim, "candidates", documents(candidates, pool)),
+            ReportSelection.class, s -> validateSelection(s == null ? null : s.evidence(), candidates, 5, pool), context);
+        List<String> allowed = selected.evidence().stream().map(Quote::evidenceId).toList();
+        selected.evidence().forEach(q -> pool.quote(q.evidenceId(), q.quote()));
+        if (allowed.isEmpty()) return unconfirmed(id, claim.text(), "주체·시기·지역·수치가 일치하는 비교 기사를 찾지 못했습니다.");
+        context.stage(Stage.VERIFYING_CLAIMS);
+        ReportReview review = generate("verify", Map.of("claim", claim, "articles", selectedDocuments(allowed, pool)),
+            ReportReview.class, r -> validateReportReview(r, allowed), context);
+        List<ReportComparison> comparisons = review.comparisons().stream()
+            .filter(r -> r.stance() != DecisionStance.UNRELATED)
+            .map(r -> new ReportComparison(r.evidenceId(), ReportStance.valueOf(r.stance().name()), r.reason())).toList();
+        if (comparisons.isEmpty())
+            return unconfirmed(id, claim.text(), "선정된 후보가 동일한 사건의 비교 기사로 확인되지 않았습니다.");
+        int matching = (int) comparisons.stream().filter(c -> c.stance() == ReportStance.MATCHES).count();
+        int contradicting = comparisons.size() - matching;
+        ReportVerdict verdict = matching > 0 && contradicting > 0 ? ReportVerdict.MIXED
+            : matching > 0 ? ReportVerdict.MATCHED : ReportVerdict.CONTRADICTED;
+        String reason = "다른 언론사의 일치 보도 " + matching + "건, 상반 보도 " + contradicting
+            + "건을 확인했습니다. 보도 일치만으로 실제 사실이 확정되지는 않습니다.";
+        return new CrossReport(id, claim.text(), verdict, reason, matching, contradicting, comparisons, false);
+    }
+
+    private CrossReport unconfirmed(String id, String text, String reason) {
+        return new CrossReport(id, text, ReportVerdict.UNCONFIRMED, reason, 0, 0, List.of(), false);
+    }
+    private boolean nearDeadline(AnalysisContext context) {
+        return context.remaining().compareTo(Duration.ofSeconds(125)) < 0;
+    }
+    private void ensureBudget(AnalysisContext context) {
+        context.check();
+        if (nearDeadline(context))
+            throw new AnalysisFailure("ANALYSIS_TIMEOUT", "남은 실행시간이 부족해 이 분석 항목을 완료하지 못했습니다.");
+    }
+
+    private ReviewedSource assessSource(String id, DraftSourceClaim claim, DraftSource source,
+                                        EvidencePool pool, AnalysisContext context) {
+        context.stage(Stage.ASSESSING_SOURCES);
+        List<SearchClient.Hit> hits = searchAll(List.of(
+            new SearchRequest(SearchClient.Provider.BRAVE, source.identityQuery()),
+            new SearchRequest(SearchClient.Provider.BRAVE, source.quoteQuery())), context);
+        List<String> candidates = collect(hits, 10, 10, pool, context, false);
+        List<Quote> selected = List.of();
+        if (!candidates.isEmpty()) {
+            SourceSelection selection = generate("source-select",
+                Map.of("claim", claim.text(), "source", source, "candidates", documents(candidates, pool)),
+                SourceSelection.class, s -> validateSelection(s == null ? null : s.evidence(), candidates, 3, pool), context);
+            selected = selection.evidence();
+            selected.forEach(q -> pool.quote(q.evidenceId(), q.quote()));
+        }
+        List<String> allowed = selected.stream().map(Quote::evidenceId).toList();
+        SourceReview review = generate("assess",
+            Map.of("article", pool.article, "claim", claim.text(), "allClaimSources", claim.sources(),
+                "source", source, "externalDocuments", selectedDocuments(allowed, pool)),
+            SourceReview.class, r -> validateSourceReview(r, source, allowed, pool), context);
+        review.evidence().forEach(q -> pool.quote(q.evidenceId(), q.quote()));
+        return new ReviewedSource(id, source.name(), source.affiliation(), source.type(),
+            source.citedInArticle(), review.verificationNote(), review.imvain().asMap(), false);
+    }
+
+    private ReviewedSource failedSource(String id, DraftSource source) {
+        Map<String, Criterion> unknown = new LinkedHashMap<>();
+        for (String key : CRITERIA) unknown.put(key, new Criterion(CriterionStatus.UNKNOWN,
+            "평가를 완료하지 못했습니다.", List.of()));
+        return new ReviewedSource(id, source.name(), source.affiliation(), source.type(),
+            source.citedInArticle(), "외부 검색 또는 평가 처리에 실패했습니다.", Map.copyOf(unknown), true);
+    }
+
+    private List<SearchClient.Hit> searchAll(List<SearchRequest> requests, AnalysisContext context) {
+        ensureBudget(context);
+        List<CompletableFuture<List<SearchClient.Hit>>> tasks = requests.stream().map(request ->
+            CompletableFuture.supplyAsync(() -> search.search(request.provider(), request.query(), 5, context), searches)).toList();
+        List<SearchClient.Hit> hits = new ArrayList<>();
+        int succeeded = 0;
+        for (var task : tasks) {
+            try {
+                hits.addAll(task.join());
+                succeeded++;
+            } catch (CompletionException e) {
+                context.check();
+                context.warn(new Issue("SEARCH_FAILED", context.stage(), "일부 검색 제공자 요청이 실패했습니다."));
+            }
+        }
+        if (succeeded == 0) throw new AnalysisFailure("SEARCH_FAILED", "외부 검색을 수행하지 못했습니다.");
+        return hits;
+    }
+
+    private List<String> collect(List<SearchClient.Hit> hits, int maxAttempts, int maxDocuments,
+                                 EvidencePool pool, AnalysisContext context, boolean newsroomOnly) {
         LinkedHashSet<String> ids = new LinkedHashSet<>();
         Set<String> visited = new HashSet<>();
-        int attempts = 0, failures = 0, successes = 0;
+        int attempts = 0, failures = 0;
         for (SearchClient.Hit hit : hits) {
-            context.check();
-            if (attempts >= limit) break;
+            ensureBudget(context);
+            if (attempts >= maxAttempts || ids.size() >= maxDocuments) break;
             String key;
             try { key = canonical(urls.validate(hit.url()).toString()); }
             catch (ApiException e) { continue; }
@@ -157,125 +241,127 @@ public class AnalysisPipeline {
             attempts++;
             try {
                 Document doc = pool.cache.get(key);
-                if (doc == null) { doc = fetcher.fetch(key, false, context); pool.cache.put(key, doc); }
-                successes++;
+                if (doc == null) {
+                    doc = fetcher.fetch(key, false, context);
+                    pool.cache.put(key, doc);
+                }
                 if (sameContent(doc.body(), pool.article.body())) continue;
-                String id = pool.add(doc);
+                if (newsroomOnly) {
+                    if (sameHost(doc.url(), pool.article.url())) continue;
+                    String originalPublisher = nonblank(pool.article.publisher())
+                        ? pool.article.publisher() : URI.create(pool.article.url()).getHost();
+                    String candidatePublisher = nonblank(doc.publisher()) ? doc.publisher() : URI.create(doc.url()).getHost();
+                    if (samePublisher(candidatePublisher, originalPublisher)) continue;
+                    if (!nonblank(doc.publisher()))
+                        doc = new Document(doc.url(), doc.title(), candidatePublisher, doc.author(),
+                            doc.publishedAt(), doc.body(), doc.truncated());
+                }
+                String id = pool.add(doc, newsroomOnly);
                 if (id != null) ids.add(id);
-            } catch (AnalysisFailure e) { context.check(); failures++; }
-            catch (ApiException e) { /* Unsafe redirect destinations are excluded. */ }
+            } catch (AnalysisFailure e) {
+                context.check();
+                failures++;
+            } catch (ApiException e) {
+                // Unsafe redirect destinations are excluded.
+            }
         }
-        if (attempts > 0 && failures == attempts) throw new AnalysisFailure(source ? "SOURCE_ASSESSMENT_FAILED" : "SEARCH_FAILED", "검색 결과 원문을 모두 수집하지 못했습니다.");
-        if (failures > 0 && successes > 0) context.warn(new Issue(source ? "SOURCE_ASSESSMENT_FAILED" : "SEARCH_FAILED", context.stage(), "일부 외부 자료의 원문을 확보하지 못했습니다."));
+        if (attempts > 0 && failures == attempts)
+            throw new AnalysisFailure("SEARCH_FAILED", "검색 후보 원문을 모두 수집하지 못했습니다.");
+        if (failures > 0) context.warn(new Issue("ARTICLE_FETCH_FAILED", context.stage(), "일부 외부 자료의 원문을 확보하지 못했습니다."));
         return List.copyOf(ids);
     }
 
+    private List<Map<String, Object>> documents(List<String> ids, EvidencePool pool) {
+        return ids.stream().map(id -> Map.<String, Object>of("evidenceId", id, "document", pool.documents.get(id))).toList();
+    }
+    private List<Map<String, Object>> selectedDocuments(List<String> ids, EvidencePool pool) {
+        return ids.stream().map(id -> Map.<String, Object>of("evidenceId", id, "document", pool.documents.get(id),
+            "quotes", List.copyOf(pool.quotes.get(id)))).toList();
+    }
     private <T> T generate(String prompt, Object input, Class<T> type, Consumer<T> validator, AnalysisContext context) {
+        ensureBudget(context);
         return llm.generate(prompt, json.writeValueAsString(input), type, validator, context);
     }
-    private List<Map<String, Object>> claimInputs(Extraction extraction) {
-        List<Map<String, Object>> values = new ArrayList<>();
-        for (int i = 0; i < extraction.claims().size(); i++) values.add(Map.of("claimId", claimId(i), "claim", extraction.claims().get(i)));
-        return values;
-    }
-    private List<Map<String, Object>> sourceInputs(Extraction extraction) {
-        List<Map<String, Object>> values = new ArrayList<>();
-        for (int i = 0; i < extraction.sources().size(); i++) values.add(Map.of("sourceId", sourceId(i), "source", extraction.sources().get(i)));
-        return values;
-    }
-    private Map<String, Object> candidateInputs(Map<String, List<String>> links, EvidencePool pool) {
-        Map<String, Object> values = new LinkedHashMap<>();
-        links.forEach((id, evidenceIds) -> values.put(id, evidenceIds.stream().map(e -> Map.of("evidenceId", e, "document", pool.documents.get(e))).toList()));
-        return values;
-    }
-    private Map<String, Object> selectedInputs(Map<String, List<String>> links, EvidencePool pool) {
-        Map<String, Object> values = new LinkedHashMap<>();
-        links.forEach((id, evidenceIds) -> values.put(id, evidenceIds.stream().map(e -> Map.of("evidenceId", e,
-            "document", pool.documents.get(e), "quotes", List.copyOf(pool.quotes.get(e)))).toList()));
-        return values;
-    }
 
-    private void validateExtraction(Extraction value, String body) {
-        require(value != null && value.claims() != null && value.claims().size() <= 3 && value.sources() != null && value.sources().size() <= 6);
-        Set<String> texts = new HashSet<>();
-        for (DraftClaim c : value.claims()) {
-            require(c != null && nonblank(c.text()) && texts.add(c.text()) && nonblank(c.question()) && c.queries() != null && !c.queries().isEmpty() && c.queries().size() <= 2);
-            c.queries().forEach(q -> require(nonblank(q) && q.length() <= 300));
-            require(c.kind() != null && c.speaker() != null);
-            if (c.kind() == ClaimKind.ATTRIBUTION) {
-                require(nonblank(c.speaker()) && contains(body, c.speaker()) && contains(c.text(), c.speaker())
-                    && contains(c.question(), c.speaker()) && c.queries().stream().anyMatch(q -> contains(q, c.speaker())));
-            } else require(c.speaker().isBlank());
+    private void validateExtraction(Extraction value, Document article) {
+        require(value != null && value.crossReportClaims() != null && value.crossReportClaims().size() <= 3
+            && value.sourceClaims() != null && value.sourceClaims().size() <= 3);
+        Set<String> crossTexts = new HashSet<>();
+        for (DraftCrossClaim claim : value.crossReportClaims()) {
+            require(claim != null && nonblank(claim.text()) && crossTexts.add(claim.text())
+                && validQuery(claim.exactQuery()) && validQuery(claim.expandedQuery()));
         }
-        for (DraftSource s : value.sources()) {
-            require(s != null && nonblank(s.name()) && s.type() != null && nonblank(s.citedInArticle()) && contains(body, s.citedInArticle()) && s.claimIndexes() != null);
-            for (Integer i : s.claimIndexes()) require(i != null && i >= 0 && i < value.claims().size());
+        Set<String> sourceTexts = new HashSet<>();
+        for (DraftSourceClaim claim : value.sourceClaims()) {
+            require(claim != null && nonblank(claim.text()) && sourceTexts.add(claim.text())
+                && claim.sources() != null && !claim.sources().isEmpty());
+            for (DraftSource source : claim.sources()) {
+                require(source != null && nonblank(source.name()) && source.affiliation() != null && source.type() != null
+                    && contains(article.title() + " " + article.body(), source.name())
+                    && (source.affiliation().isBlank() || contains(article.title() + " " + article.body(), source.affiliation()))
+                    && nonblank(source.citedInArticle()) && contains(article.body(), source.citedInArticle())
+                    && validQuery(source.identityQuery()) && validQuery(source.quoteQuery()));
+            }
         }
     }
-    private void validateSelection(Selection value, Map<String, List<String>> candidates, EvidencePool pool) {
-        require(value != null && value.claims() != null && value.claims().size() == candidates.size());
+    private void validateSelection(List<Quote> selected, List<String> candidates, int max, EvidencePool pool) {
+        require(selected != null && selected.size() <= max);
         Set<String> seen = new HashSet<>();
-        for (SelectedClaim claim : value.claims()) {
-            require(claim != null && candidates.containsKey(claim.claimId()) && seen.add(claim.claimId()) && claim.evidence() != null && claim.evidence().size() <= 3);
-            Set<String> ids = new HashSet<>();
-            for (Quote q : claim.evidence()) require(q != null && candidates.get(claim.claimId()).contains(q.evidenceId()) && ids.add(q.evidenceId())
-                && nonblank(q.quote()) && q.quote().length() <= 1000 && contains(pool.documents.get(q.evidenceId()).body(), q.quote()));
+        for (Quote quote : selected) {
+            require(quote != null && candidates.contains(quote.evidenceId()) && seen.add(quote.evidenceId())
+                && nonblank(quote.quote()) && quote.quote().length() <= 1000
+                && contains(pool.documents.get(quote.evidenceId()).body(), quote.quote()));
         }
     }
-    private void validateVerification(Verification value, Map<String, List<String>> allowed, EvidencePool pool) {
-        require(value != null && value.claims() != null && value.claims().size() == allowed.size());
+    private void validateReportReview(ReportReview review, List<String> allowed) {
+        require(review != null && review.comparisons() != null && review.comparisons().size() == allowed.size());
         Set<String> seen = new HashSet<>();
-        for (VerifiedClaim claim : value.claims()) {
-            require(claim != null && allowed.containsKey(claim.claimId()) && seen.add(claim.claimId()) && claim.verdict() != null && nonblank(claim.reason()) && claim.evidenceLinks() != null);
-            require(claim.attributionQuotes() != null);
-            Set<String> used = new HashSet<>(); Set<Stance> stances = new HashSet<>();
-            for (EvidenceLink link : claim.evidenceLinks()) {
-                require(link != null && allowed.get(claim.claimId()).contains(link.evidenceId()) && used.add(link.evidenceId()) && link.stance() != null);
-                stances.add(link.stance());
-            }
-            for (Quote quote : claim.attributionQuotes()) require(quote != null && used.contains(quote.evidenceId())
-                && nonblank(quote.quote()) && quote.quote().length() <= 1000 && contains(pool.documents.get(quote.evidenceId()).body(), quote.quote()));
-            switch (claim.verdict()) {
-                case SUPPORT -> require(stances.contains(Stance.SUPPORTS));
-                case REFUTE -> require(stances.contains(Stance.REFUTES));
-                case CONFLICT -> require(stances.contains(Stance.SUPPORTS) && stances.contains(Stance.REFUTES));
-                case INSUFFICIENT -> { }
-            }
-        }
+        for (ReportDecision decision : review.comparisons())
+            require(decision != null && allowed.contains(decision.evidenceId()) && seen.add(decision.evidenceId())
+                && decision.stance() != null && nonblank(decision.reason()));
     }
-    private void validateAssessment(Assessment value, Extraction extracted, Map<String, List<String>> allowed, EvidencePool pool) {
-        require(value != null && value.sources() != null && value.sources().size() == allowed.size());
-        Set<String> seen = new HashSet<>();
-        for (SourceReview review : value.sources()) {
-            require(review != null && allowed.containsKey(review.sourceId()) && seen.add(review.sourceId()) && nonblank(review.verificationNote()) && review.imvain() != null);
-            require(review.evidence() != null);
-            Set<String> quoted = new HashSet<>();
-            for (Quote quote : review.evidence()) {
-                require(quote != null && allowed.get(review.sourceId()).contains(quote.evidenceId()) && nonblank(quote.quote())
-                    && quote.quote().length() <= 1000 && contains(pool.documents.get(quote.evidenceId()).body(), quote.quote()));
-                quoted.add(quote.evidenceId());
-            }
-            for (String key : CRITERIA) {
-                Criterion c = review.imvain().asMap().get(key);
-                require(c != null && c.status() != null && nonblank(c.reason()) && c.evidenceIds() != null && allowed.get(review.sourceId()).containsAll(c.evidenceIds()) && quoted.containsAll(c.evidenceIds()));
-            }
-            if (!extracted.sources().get(index(review.sourceId())).identifiable()) require(review.imvain().named().status() == CriterionStatus.NOT_MET);
+    private void validateSourceReview(SourceReview review, DraftSource source, List<String> allowed, EvidencePool pool) {
+        require(review != null && nonblank(review.verificationNote()) && review.imvain() != null && review.evidence() != null);
+        Set<String> quoted = new HashSet<>();
+        for (Quote quote : review.evidence()) {
+            require(quote != null && allowed.contains(quote.evidenceId()) && nonblank(quote.quote())
+                && quote.quote().length() <= 1000 && contains(pool.documents.get(quote.evidenceId()).body(), quote.quote()));
+            quoted.add(quote.evidenceId());
         }
+        for (String key : CRITERIA) {
+            Criterion criterion = review.imvain().asMap().get(key);
+            require(criterion != null && criterion.status() != null && nonblank(criterion.reason())
+                && criterion.evidenceIds() != null && allowed.containsAll(criterion.evidenceIds())
+                && quoted.containsAll(criterion.evidenceIds()));
+        }
+        if (!source.identifiable()) require(review.imvain().named().status() == CriterionStatus.NOT_MET);
+        if (allowed.isEmpty()) for (String key : List.of("independent", "verify", "authoritative", "informed"))
+            require(review.imvain().asMap().get(key).status() == CriterionStatus.UNKNOWN);
     }
-    private void validateSummary(OverallSummary s) {
-        require(s != null && nonblank(s.overallComment()) && nonblank(s.factCheckOverview()) && s.sourceAssessmentOverview() != null && s.unverifiedPoints() != null);
-        s.unverifiedPoints().forEach(p -> require(nonblank(p)));
+    private void validateSummary(OverallSummary summary) {
+        require(summary != null && nonblank(summary.overallComment()) && nonblank(summary.crossReportOverview())
+            && nonblank(summary.sourceAssessmentOverview()) && summary.unverifiedPoints() != null);
+        summary.unverifiedPoints().forEach(point -> require(nonblank(point)));
     }
     static void require(boolean condition) { if (!condition) throw new IllegalArgumentException("Invalid grounded model output"); }
-    private static boolean nonblank(String s) { return s != null && !s.isBlank(); }
+    private static boolean nonblank(String value) { return value != null && !value.isBlank(); }
+    private static boolean validQuery(String value) { return nonblank(value) && value.length() <= 300; }
     static boolean contains(String body, String quote) { return DocumentFetcher.clean(body).contains(DocumentFetcher.clean(quote)); }
-    private static String claimId(int i) { return "claim-" + (i + 1); }
-    private static String sourceId(int i) { return "source-" + (i + 1); }
-    private static int index(String id) { return Integer.parseInt(id.substring(id.lastIndexOf('-') + 1)) - 1; }
+    private static boolean samePublisher(String a, String b) {
+        return nonblank(a) && nonblank(b) && DocumentFetcher.clean(a).equalsIgnoreCase(DocumentFetcher.clean(b));
+    }
+    private static boolean sameHost(String a, String b) {
+        return URI.create(a).getHost().equalsIgnoreCase(URI.create(b).getHost());
+    }
+    private static String reportId(int i) { return "report-" + (i + 1); }
+    private static String sourceClaimId(int i) { return "source-claim-" + (i + 1); }
+    private static String sourceId(int i, int j) { return "source-" + (i + 1) + "-" + (j + 1); }
     static String canonical(String url) {
         URI uri = URI.create(url);
         String query = uri.getRawQuery();
-        if (query != null) query = Arrays.stream(query.split("&")).filter(p -> !p.toLowerCase(Locale.ROOT).matches("(utm_[^=]*|fbclid|gclid)=.*")).collect(Collectors.joining("&"));
+        if (query != null) query = Arrays.stream(query.split("&"))
+            .filter(p -> !p.toLowerCase(Locale.ROOT).matches("(utm_[^=]*|fbclid|gclid)=.*"))
+            .collect(Collectors.joining("&"));
         String path = uri.getRawPath();
         return uri.getScheme().toLowerCase(Locale.ROOT) + "://" + uri.getRawAuthority().toLowerCase(Locale.ROOT)
             + (path == null || path.isEmpty() ? "/" : path) + (query == null || query.isEmpty() ? "" : "?" + query);
@@ -286,34 +372,42 @@ public class AnalysisPipeline {
         if (Math.min(x.length(), y.length()) < 100) return false;
         Set<String> sx = shingles(x), sy = shingles(y);
         long shared = sx.stream().filter(sy::contains).count();
-        return shared / (double)Math.max(sx.size(), sy.size()) > 0.85;
+        return shared / (double) Math.max(sx.size(), sy.size()) > 0.85;
     }
     private static Set<String> shingles(String text) {
         Set<String> values = new HashSet<>();
         for (int i = 0; i + 12 <= text.length(); i += 6) values.add(text.substring(i, i + 12));
         return values;
     }
-
+    private record SearchRequest(SearchClient.Provider provider, String query) {}
     private static final class EvidencePool {
         final Document article;
-        final Map<String, Document> cache = new HashMap<>();
+        final Map<String, Document> cache = new ConcurrentHashMap<>();
         final Map<String, Document> documents = new LinkedHashMap<>();
         final Map<String, LinkedHashSet<String>> quotes = new LinkedHashMap<>();
         EvidencePool(Document article) { this.article = article; }
-        String add(Document doc) {
-            for (var entry : documents.entrySet()) if (canonical(entry.getValue().url()).equals(canonical(doc.url())) || sameContent(entry.getValue().body(), doc.body())) return entry.getKey();
+        String add(Document doc, boolean dedupeContent) {
+            for (var entry : documents.entrySet())
+                if (canonical(entry.getValue().url()).equals(canonical(doc.url()))
+                    || (dedupeContent && sameContent(entry.getValue().body(), doc.body()))) return entry.getKey();
             String id = "evidence-" + (documents.size() + 1);
-            documents.put(id, doc); return id;
+            documents.put(id, doc);
+            return id;
         }
-        void quote(String id, String text) { quotes.computeIfAbsent(id, ignored -> new LinkedHashSet<>()).add(DocumentFetcher.clean(text)); }
-        List<Evidence> usedEvidence(List<Claim> claims, List<ArticleSource> sources) {
+        void quote(String id, String text) {
+            quotes.computeIfAbsent(id, ignored -> new LinkedHashSet<>()).add(DocumentFetcher.clean(text));
+        }
+        List<Evidence> usedEvidence(List<CrossReport> reports, List<SourceAssessment> assessments) {
             Set<String> used = new LinkedHashSet<>();
-            claims.forEach(c -> c.evidenceLinks().forEach(l -> used.add(l.evidenceId())));
-            if (sources != null) sources.forEach(s -> s.imvain().values().forEach(c -> used.addAll(c.evidenceIds())));
+            reports.forEach(r -> r.comparisons().forEach(c -> used.add(c.evidenceId())));
+            assessments.forEach(a -> a.sources().forEach(s ->
+                s.imvain().values().forEach(c -> used.addAll(c.evidenceIds()))));
             return used.stream().map(id -> {
-                Document d = documents.get(id);
-                return new Evidence(id, d.title(), d.publisher(), d.url(), d.publishedAt(), String.join(" … ", quotes.get(id)));
+                Document doc = documents.get(id);
+                return new Evidence(id, doc.title(), doc.publisher(), doc.url(), doc.publishedAt(),
+                    String.join(" … ", quotes.getOrDefault(id, new LinkedHashSet<>())));
             }).toList();
         }
     }
+    @PreDestroy public void close() { searches.shutdownNow(); }
 }
