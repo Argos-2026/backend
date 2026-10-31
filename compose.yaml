@@ -9,3 +9,24 @@ services:
       SPRING_PROFILES_ACTIVE: prod
     env_file:
       - .env
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: argos-backend-caddy
+    restart: unless-stopped
+    depends_on:
+      - springboot
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
