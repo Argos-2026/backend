@@ -7,9 +7,9 @@ if [[ ! "$IMAGE" =~ ^ghcr\.io/argos-2026/backend:[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
-cd /home/ec2-user/backend
+cd /home/ec2-user/apps/backend
 if [[ ! -f compose.yaml || ! -f Caddyfile ]]; then
-  echo "Expected existing compose.yaml and Caddyfile in ~/backend" >&2
+  echo "Expected existing compose.yaml and Caddyfile in /home/ec2-user/apps/backend" >&2
   exit 1
 fi
 
