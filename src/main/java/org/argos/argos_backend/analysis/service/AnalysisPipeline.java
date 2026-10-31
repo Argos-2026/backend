@@ -19,6 +19,7 @@ import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
 import static org.argos.argos_backend.analysis.domain.AnalysisModels.*;
+import static org.argos.argos_backend.analysis.domain.ReportingModels.*;
 import static org.argos.argos_backend.external.document.DocumentFetcher.Document;
 import static org.argos.argos_backend.external.llm.LlmModels.*;
 
@@ -150,38 +151,115 @@ public class AnalysisPipeline {
 
     private CrossReport analyzeReport(String id, DraftCrossClaim claim, EvidencePool pool, AnalysisContext context) {
         context.stage(Stage.RETRIEVING_EVIDENCE);
-        List<SearchRequest> requests = List.of(
-            new SearchRequest(SearchClient.Provider.NAVER, claim.exactQuery()),
-            new SearchRequest(SearchClient.Provider.BRAVE, claim.exactQuery()),
-            new SearchRequest(SearchClient.Provider.NAVER, claim.expandedQuery()),
-            new SearchRequest(SearchClient.Provider.BRAVE, claim.expandedQuery()));
+        boolean issueAvailable = false;
+        if (claim.issue() != null) {
+            try {
+                ReportPerspectivePolicy.validateIssue(claim.issue(), pool.article);
+                issueAvailable = true;
+            } catch (RuntimeException invalid) {
+                enrichmentFailure(id, "ISSUE_FRAME_INVALID", "쟁점의 원문 근거를 확인하지 못해 기존 검색·선정을 사용합니다.", context);
+            }
+        }
+        TemporalContext temporal = ReportRetrievalPolicy.context(claim, pool.article, issueAvailable ? claim.issue() : null);
+        context.trace(t -> t.temporal(id, temporal));
+        List<SearchRequest> requests = new ArrayList<>(List.of(
+            new SearchRequest(SearchClient.Provider.NAVER, ReportRetrievalPolicy.normalizeYears(claim.exactQuery(), pool.article.publishedAt()), QueryType.EXACT),
+            new SearchRequest(SearchClient.Provider.BRAVE, ReportRetrievalPolicy.normalizeYears(claim.exactQuery(), pool.article.publishedAt()), QueryType.EXACT),
+            new SearchRequest(SearchClient.Provider.NAVER, ReportRetrievalPolicy.normalizeYears(claim.expandedQuery(), pool.article.publishedAt()), QueryType.EXPANDED),
+            new SearchRequest(SearchClient.Provider.BRAVE, ReportRetrievalPolicy.normalizeYears(claim.expandedQuery(), pool.article.publishedAt()), QueryType.EXPANDED)));
+        if (issueAvailable) {
+            String neutral = ReportRetrievalPolicy.query(ReportPerspectivePolicy.neutralQuery(claim.issue()), temporal);
+            String challenge = neutral + " 정정";
+            context.trace(t -> t.issue(id, claim.issue(), neutral, challenge));
+            requests.add(new SearchRequest(SearchClient.Provider.NAVER, neutral, QueryType.NEUTRAL));
+            requests.add(new SearchRequest(SearchClient.Provider.BRAVE, challenge, QueryType.CHALLENGE));
+        }
         List<RetrievedHit> hits = searchAll(requests, context, id);
+        hits = prioritize(hits, temporal, issueAvailable ? claim.issue() : null, context, id);
         List<String> candidates = collect(hits, 10, 10, pool, context, true, id);
         if (candidates.isEmpty()) return unconfirmed(id, claim.text(), "다른 언론사의 관련 기사 원문을 확보하지 못했습니다.");
         context.stage(Stage.SELECTING_EVIDENCE);
-        ReportSelection selected = generate("select", Map.of("claim", claim, "candidates", documents(candidates, pool)),
+        ReportSelection selected = null;
+        boolean perspectiveSelection = false;
+        List<CandidateClaim> candidateClaims = List.of();
+        if (issueAvailable) {
+            try {
+                PerspectiveSelection perspectives = generate("perspectives",
+                    Map.of("claim", claim.text(), "issue", claim.issue(), "original", pool.article, "temporalContext", temporal,
+                        "candidates", documents(candidates, pool)),
+                    PerspectiveSelection.class, s -> ReportPerspectivePolicy.validate(s, candidates, pool.documents), context);
+                perspectives.candidates().forEach(c -> context.trace(t -> t.perspective(id, c)));
+                candidateClaims = perspectives.candidates();
+                selected = new ReportSelection(ReportPerspectivePolicy.select(perspectives, candidates, 5).stream()
+                    .map(c -> new Quote(c.evidenceId(), c.quote())).toList());
+                perspectiveSelection = true;
+            } catch (AnalysisFailure failure) {
+                context.check();
+                enrichmentFailure(id, "PERSPECTIVE_ANALYSIS_FAILED", "관점 분석에 실패해 기존 근거 선정을 사용합니다.", context);
+            }
+        }
+        if (selected == null) selected = generate("select",
+            Map.of("claim", claim.text(), "temporalContext", temporal, "candidates", documents(candidates, pool)),
             ReportSelection.class, s -> validateSelection(s == null ? null : s.evidence(), candidates, 5, pool), context);
         List<String> allowed = selected.evidence().stream().map(Quote::evidenceId).toList();
-        context.trace(t -> t.selection(id, candidates, allowed));
+        if (perspectiveSelection) context.trace(t -> t.perspectiveSelection(id, candidates, allowed));
+        else context.trace(t -> t.selection(id, candidates, allowed));
         selected.evidence().forEach(q -> pool.quote(q.evidenceId(), q.quote()));
-        if (allowed.isEmpty()) return unconfirmed(id, claim.text(), "주체·시기·지역·수치가 일치하는 비교 기사를 찾지 못했습니다.");
+        Map<String, LinkedHashSet<String>> reportQuotes = new LinkedHashMap<>();
+        selected.evidence().forEach(q -> reportQuotes.computeIfAbsent(q.evidenceId(), ignored -> new LinkedHashSet<>())
+            .add(DocumentFetcher.clean(q.quote())));
+        if (allowed.isEmpty()) return unconfirmed(id, claim.text(), "동일 사건·대상·기간·지표에서 직접 비교할 본문 근거를 찾지 못했습니다.");
         context.stage(Stage.VERIFYING_CLAIMS);
-        ReportReview review = generate("verify", Map.of("claim", claim, "articles", selectedDocuments(allowed, pool)),
+        ReportReview review = generate("verify", Map.of("claim", claim.text(), "original", pool.article, "temporalContext", temporal,
+                "articles", selectedDocuments(allowed, pool), "candidateClaims",
+                candidateClaims.stream().filter(c -> allowed.contains(c.evidenceId())).toList()),
             ReportReview.class, r -> validateReportReview(r, allowed), context);
         context.trace(t -> review.comparisons().forEach(r ->
             t.comparison(id, r.evidenceId(), r.stance().name(), r.reason())));
-        List<ReportComparison> comparisons = review.comparisons().stream()
-            .filter(r -> r.stance() != DecisionStance.UNRELATED)
-            .map(r -> new ReportComparison(r.evidenceId(), ReportStance.valueOf(r.stance().name()), r.reason())).toList();
+        List<ReportComparison> comparisons = new ArrayList<>();
+        boolean rejectedConflict = false;
+        boolean rejectedMatch = false;
+        for (ReportDecision decision : review.comparisons()) {
+            if (decision.stance() == DecisionStance.UNRELATED) continue;
+            if (decision.stance() == DecisionStance.MATCHES && !temporal.action().equals("NONE")) {
+                MatchResolution resolution = ReportPerspectivePolicy.resolveMatch(decision.matchCheck(), claim.text(), pool.article,
+                    pool.documents.get(decision.evidenceId()), issueAvailable ? claim.issue() : null);
+                context.trace(t -> t.matchResolution(id, decision.evidenceId(), resolution));
+                if (!resolution.accepted()) { rejectedMatch = true; continue; }
+                pool.quote(decision.evidenceId(), resolution.check().externalQuote());
+                reportQuotes.get(decision.evidenceId()).add(DocumentFetcher.clean(resolution.check().externalQuote()));
+            }
+            if (decision.stance() == DecisionStance.CONTRADICTS) {
+                var resolution = ReportPerspectivePolicy.resolve(decision.conflictCheck(), pool.article,
+                    pool.documents.get(decision.evidenceId()), issueAvailable ? claim.issue() : null);
+                context.trace(t -> t.resolution(id, decision.evidenceId(), resolution));
+                if (!resolution.accepted()) { rejectedConflict = true; continue; }
+                pool.quote(decision.evidenceId(), resolution.check().externalQuote());
+                reportQuotes.get(decision.evidenceId()).add(DocumentFetcher.clean(resolution.check().externalQuote()));
+            }
+            comparisons.add(new ReportComparison(decision.evidenceId(), ReportStance.valueOf(decision.stance().name()), decision.reason()));
+            for (String quote : reportQuotes.get(decision.evidenceId()))
+                context.trace(t -> t.usedQuote(id, decision.evidenceId(), quote));
+        }
         if (comparisons.isEmpty())
-            return unconfirmed(id, claim.text(), "선정된 후보가 동일한 사건의 비교 기사로 확인되지 않았습니다.");
+            return unconfirmed(id, claim.text(), rejectedMatch
+                ? "수치·변경 행위·비교 기준이 모두 확인되지 않아 일치를 인정하지 않았습니다."
+                : rejectedConflict
+                ? "동일 비교 조건과 양립 불가능한 본문 근거를 확인하지 못해 상반을 인정하지 않았습니다."
+                : "선정된 후보가 동일한 사건의 비교 기사로 확인되지 않았습니다.");
         int matching = (int) comparisons.stream().filter(c -> c.stance() == ReportStance.MATCHES).count();
         int contradicting = comparisons.size() - matching;
         ReportVerdict verdict = matching > 0 && contradicting > 0 ? ReportVerdict.MIXED
             : matching > 0 ? ReportVerdict.MATCHED : ReportVerdict.CONTRADICTED;
         String reason = "다른 언론사의 일치 보도 " + matching + "건, 상반 보도 " + contradicting
             + "건을 확인했습니다. 보도 일치만으로 실제 사실이 확정되지는 않습니다.";
-        return new CrossReport(id, claim.text(), verdict, reason, matching, contradicting, comparisons, false);
+        return new CrossReport(id, claim.text(), verdict, reason, matching, contradicting, List.copyOf(comparisons), false);
+    }
+
+    private void enrichmentFailure(String id, String code, String message, AnalysisContext context) {
+        Issue issue = new Issue(code, context.stage(), message);
+        context.warn(issue);
+        context.trace(t -> t.enrichmentFailure(id, issue));
     }
 
     private CrossReport unconfirmed(String id, String text, String reason) {
@@ -231,18 +309,21 @@ public class AnalysisPipeline {
 
     private List<RetrievedHit> searchAll(List<SearchRequest> requests, AnalysisContext context, String claimId) {
         ensureBudget(context);
+        Map<SearchRequestKey, SearchRequest> unique = new LinkedHashMap<>();
+        requests.forEach(r -> unique.putIfAbsent(new SearchRequestKey(r.provider(), r.query()), r));
+        requests = List.copyOf(unique.values());
         List<CompletableFuture<List<RetrievedHit>>> tasks = new ArrayList<>();
         for (int i = 0; i < requests.size(); i++) {
             SearchRequest request = requests.get(i);
             String requestId = "search-" + (i + 1);
-            QueryType type = i < 2 ? QueryType.EXACT : QueryType.EXPANDED;
+            QueryType type = request.type();
             tasks.add(CompletableFuture.supplyAsync(() -> {
                 if (claimId != null) context.trace(t -> t.searchStarted(claimId, requestId, request.provider(), type, request.query()));
                 try {
                     List<SearchClient.Hit> found = search.search(request.provider(), request.query(), 5, context);
                     List<RetrievedHit> retrieved = new ArrayList<>();
                     for (int j = 0; j < found.size(); j++)
-                        retrieved.add(new RetrievedHit(found.get(j), requestId + "-candidate-" + (j + 1)));
+                        retrieved.add(new RetrievedHit(found.get(j), requestId + "-candidate-" + (j + 1), type));
                     if (claimId != null) context.trace(t -> {
                         t.searchFinished(claimId, requestId, found.size(), null);
                         retrieved.forEach(hit -> t.candidate(claimId, hit.candidateId(), requestId, request.provider(), hit.hit()));
@@ -255,11 +336,11 @@ public class AnalysisPipeline {
                 }
             }, searches));
         }
-        List<RetrievedHit> hits = new ArrayList<>();
+        List<List<RetrievedHit>> batches = new ArrayList<>();
         int succeeded = 0;
         for (var task : tasks) {
             try {
-                hits.addAll(task.join());
+                batches.add(task.join());
                 succeeded++;
             } catch (CompletionException e) {
                 context.check();
@@ -267,6 +348,12 @@ public class AnalysisPipeline {
             }
         }
         if (succeeded == 0) throw new AnalysisFailure("SEARCH_FAILED", "외부 검색을 수행하지 못했습니다.");
+        if (claimId == null) return batches.stream().flatMap(List::stream).toList();
+        List<RetrievedHit> hits = new ArrayList<>();
+        // Interleave provider/query ranks so exact queries cannot consume the entire fetch budget.
+        int ranks = batches.stream().mapToInt(List::size).max().orElse(0);
+        for (int rank = 0; rank < ranks; rank++)
+            for (List<RetrievedHit> batch : batches) if (rank < batch.size()) hits.add(batch.get(rank));
         return hits;
     }
 
@@ -307,10 +394,14 @@ public class AnalysisPipeline {
                     pool.cache.put(key, doc);
                     traceEvent(context, claimId, retrieved, "FETCH_SUCCEEDED", null);
                 } else traceEvent(context, claimId, retrieved, "DOCUMENT_CACHE_HIT", "이 작업에서 이미 수집한 본문을 재사용했습니다.");
-                if (sameContent(doc.body(), pool.article.body())) {
+                Document collected = doc;
+                if (claimId != null) context.trace(t -> t.document(claimId, retrieved.candidateId(), collected));
+                if (newsroomOnly ? exactContent(doc.body(), pool.article.body()) : sameContent(doc.body(), pool.article.body())) {
                     traceEvent(context, claimId, retrieved, "SAME_CONTENT_AS_ORIGINAL", "분석 대상 기사와 본문이 같습니다.");
                     continue;
                 }
+                if (newsroomOnly && sameContent(doc.body(), pool.article.body()))
+                    traceEvent(context, claimId, retrieved, "SIMILAR_CONTENT_RETAINED", "본문이 유사해도 수치·부정·정정 차이를 분석하도록 보존했습니다.");
                 if (newsroomOnly) {
                     if (sameHost(doc.url(), pool.article.url())) {
                         traceEvent(context, claimId, retrieved, "SAME_HOST_AS_ORIGINAL", "분석 대상 기사와 호스트가 같습니다.");
@@ -327,6 +418,8 @@ public class AnalysisPipeline {
                         doc = new Document(doc.url(), doc.title(), candidatePublisher, doc.author(),
                             doc.publishedAt(), doc.body(), doc.truncated());
                 }
+                Document accepted = doc;
+                if (claimId != null) context.trace(t -> t.document(claimId, retrieved.candidateId(), accepted));
                 int before = pool.documents.size();
                 String id = pool.add(doc, newsroomOnly);
                 if (id != null) {
@@ -362,7 +455,22 @@ public class AnalysisPipeline {
         // Never persist arbitrary exception messages, remote bodies, headers, or credentials.
         return new Issue("INTERNAL_SERVER_ERROR", stage, "처리 중 예기치 않은 오류가 발생했습니다. (" + failure.getClass().getSimpleName() + ")");
     }
-    private record RetrievedHit(SearchClient.Hit hit, String candidateId) {}
+    private List<RetrievedHit> prioritize(List<RetrievedHit> hits, TemporalContext temporal, IssueFrame issue,
+                                          AnalysisContext context, String claimId) {
+        List<ReportRetrievalPolicy.Ranked> ranked = ReportRetrievalPolicy.rank(hits.stream()
+            .map(h -> new ReportRetrievalPolicy.Candidate(h.candidateId(), h.hit(), h.type())).toList(), temporal, issue);
+        List<RetrievedHit> eligible = new ArrayList<>();
+        for (var entry : ranked) {
+            var candidate = entry.candidate();
+            context.trace(t -> t.prefetch(claimId, candidate.id(), entry.priority()));
+            RetrievedHit hit = new RetrievedHit(candidate.hit(), candidate.id(), candidate.type());
+            if (entry.priority().eligible()) eligible.add(hit);
+            else traceEvent(context, claimId, hit, entry.priority().reasons().contains("DUPLICATE_URL")
+                ? "DUPLICATE_URL" : "PREFETCH_REJECTED", String.join(", ", entry.priority().reasons()));
+        }
+        return List.copyOf(eligible);
+    }
+    private record RetrievedHit(SearchClient.Hit hit, String candidateId, QueryType type) {}
 
     private List<Map<String, Object>> documents(List<String> ids, EvidencePool pool) {
         return ids.stream().map(id -> Map.<String, Object>of("evidenceId", id, "document", pool.documents.get(id))).toList();
@@ -467,12 +575,18 @@ public class AnalysisPipeline {
         long shared = sx.stream().filter(sy::contains).count();
         return shared / (double) Math.max(sx.size(), sy.size()) > 0.85;
     }
+    static boolean exactContent(String a, String b) {
+        return DocumentFetcher.clean(a).equalsIgnoreCase(DocumentFetcher.clean(b));
+    }
     private static Set<String> shingles(String text) {
         Set<String> values = new HashSet<>();
         for (int i = 0; i + 12 <= text.length(); i += 6) values.add(text.substring(i, i + 12));
         return values;
     }
-    private record SearchRequest(SearchClient.Provider provider, String query) {}
+    private record SearchRequest(SearchClient.Provider provider, String query, QueryType type) {
+        SearchRequest(SearchClient.Provider provider, String query) { this(provider, query, QueryType.EXACT); }
+    }
+    private record SearchRequestKey(SearchClient.Provider provider, String query) {}
     private static final class EvidencePool {
         final Document article;
         final Map<String, Document> cache = new ConcurrentHashMap<>();
@@ -482,7 +596,7 @@ public class AnalysisPipeline {
         String add(Document doc, boolean dedupeContent) {
             for (var entry : documents.entrySet())
                 if (canonical(entry.getValue().url()).equals(canonical(doc.url()))
-                    || (dedupeContent && sameContent(entry.getValue().body(), doc.body()))) return entry.getKey();
+                    || (dedupeContent && exactContent(entry.getValue().body(), doc.body()))) return entry.getKey();
             String id = "evidence-" + (documents.size() + 1);
             documents.put(id, doc);
             return id;

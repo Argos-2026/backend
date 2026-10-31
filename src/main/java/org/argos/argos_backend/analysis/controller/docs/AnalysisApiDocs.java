@@ -102,6 +102,7 @@ public interface AnalysisApiDocs {
             + "개별 정보원 평가 실패 시 assessmentFailed=true이며 다른 정보원 결과는 유지됩니다. "
             + "crossReports와 sourceAssessments가 모두 비어 있으면 선정할 주장이 없었던 경우입니다. "
             + "비교 기사와 IMVAIN 근거 ID는 evidence의 원문 URL·발췌와 연결합니다. "
+            + "보도 관점 후보와 충돌 비교 조건은 별도 cross-report/trace에서 조회할 수 있으며 후보 유형 자체는 최종 상반 판정이 아닙니다. "
             + "저장된 결과만 읽으며 검색·LLM을 다시 호출하지 않습니다. 기사 전문과 API 키는 포함하지 않습니다.")
     @ApiResponses({
         @ApiResponse(responseCode = "200", description = "COMPLETED 또는 PARTIAL_COMPLETED 결과. 부분 완료 시 warnings를 함께 확인하세요.",
@@ -136,14 +137,22 @@ public interface AnalysisApiDocs {
             + "QUEUED·RUNNING·FAILED 상태도 HTTP 200으로 반환하며 아직 수행하지 않은 단계는 기록하지 않습니다. "
             + "검색 후보는 검색 결과 출현별로 구분하며 중복 근거는 같은 evidenceId로 연결합니다. "
             + "COLLECTION_LIMIT_REACHED는 기존 수집 한도로 미처리한 후보입니다. events가 비어 있으면 수집 처리 기록이 없습니다. "
-            + "llmSelected=null은 선정 결과 없음, false는 LLM 미선정입니다. 기존 선정 응답에 이유가 없어 선정 이유는 제공하지 않습니다. "
+            + "기존 select 경로의 llmSelected=null은 선정 응답 없음, false는 LLM 미선정입니다. 기존 선정 응답의 이유는 생성하지 않습니다. "
+            + "쟁점 관점 경로는 issue·neutralQuery·challengeQuery, NEUTRAL·CHALLENGE 검색 유형을 추가하고 verificationSelection에 서버의 최종 비교 선정 여부와 이유를 기록합니다. 이 경로는 llmSelected를 설정하지 않습니다. "
+            + "claimAnalysis는 본문에서 확인한 statement·quote와 모델의 perspective·reason을 구분합니다. document는 수집 메타데이터, searchDescription·searchDateHint는 검색 응답의 요약·날짜 힌트이며 확정 근거가 아닙니다. "
+            + "conflictResolution은 모델의 비교 조건과 서버의 상반 인정·탈락을 구분하며 usedQuotes는 최종 집계에 사용한 본문 인용입니다. enrichmentIssues는 관점 분석의 부분 실패·기존 경로 복구 기록입니다. "
+            + "temporalContext는 원문 발행일 기준 절대 연도, 발표 사건일(또는 발행일 fallback)과 통계 대상 기간을 분리합니다. prefetchPriority는 전체 후보의 수집 전 순서·점수·적격 여부·이유이며 사실 판정이 아닙니다. "
+            + "PREFETCH_REJECTED는 메타데이터에서 다른 발표 사건이 식별된 후보입니다. 발행일만으로 제외하지 않으며 이후 정정·회고도 보존합니다. matchResolution은 유지·상향·하향 주장의 수치·행위·비교 기준을 검증해 일치 인정/보류한 결과입니다. "
             + "UNRELATED 비교도 Trace에 보존하지만 기존 결과 집계에는 포함하지 않습니다. "
             + "Trace는 최선 노력으로 기록하며 작업과 동일한 메모리·만료 정책을 따릅니다. 저장된 기록만 읽고 외부 API는 호출하지 않습니다.")
     @ApiResponses({
         @ApiResponse(responseCode = "200", description = "현재까지 확보된 Trace. error는 작업 전체 실패, claims[].failure는 주장 분석 실패 원인입니다.",
             headers = @Header(name = "Cache-Control", schema = @Schema(type = "string", example = "no-store")),
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = CrossReportTraceResponse.class),
-                examples = @ExampleObject(name = "검색부터 최종 비교까지", value = AnalysisResponseExamples.TRACE))),
+                examples = {
+                    @ExampleObject(name = "검색부터 최종 비교까지", value = AnalysisResponseExamples.TRACE),
+                    @ExampleObject(name = "관점 후보와 충돌 검증", value = AnalysisResponseExamples.TRACE_PERSPECTIVE)
+                })),
         @ApiResponse(responseCode = "400", description = "INVALID_ANALYSIS_ID: UUID 형식 오류",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = ApiErrorResponse.class))),
         @ApiResponse(responseCode = "404", description = "ANALYSIS_NOT_FOUND: 없는 ID·만료·서버 재시작으로 유실",

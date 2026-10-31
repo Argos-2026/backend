@@ -113,6 +113,22 @@ class OpenApiIntegrationTests {
         assertEquals("/v3/api-docs", json.readTree(config.body()).path("url").asString());
     }
 
+    @Test void documentsAdditivePerspectiveTraceWithoutChangingFinalVerdictEnums() throws Exception {
+        JsonNode doc = document();
+        JsonNode candidate = doc.path("components").path("schemas").path("CandidateTrace").path("properties");
+        assertTrue(names(candidate).containsAll(Set.of("llmSelected", "comparison", "claimAnalysis", "document",
+            "conflictResolution", "usedQuotes", "verificationSelection", "searchDescription", "searchDateHint",
+            "prefetchPriority", "matchResolution")));
+        JsonNode claims = doc.path("components").path("schemas").path("ClaimTrace").path("properties");
+        assertTrue(names(claims).containsAll(Set.of("issue", "neutralQuery", "challengeQuery", "enrichmentIssues", "temporalContext")));
+        JsonNode verdict = doc.path("components").path("schemas").path("CrossReport").path("properties").path("verdict");
+        assertEquals(List.of("MATCHED", "CONTRADICTED", "MIXED", "UNCONFIRMED"), json.readValue(verdict.path("enum").toString(), List.class));
+        JsonNode examples = doc.path("paths").path("/api/v1/analyses/{analysisId}/cross-report/trace").path("get")
+            .path("responses").path("200").path("content").path("application/json").path("examples");
+        assertTrue(examples.has("관점 후보와 충돌 검증"));
+        assertEquals(6, examples.path("관점 후보와 충돌 검증").path("value").path("claims").get(0).path("searches").size());
+    }
+
     private void assertOperation(JsonNode operation, String id, String summary, Set<String> codes) {
         assertEquals(id, operation.path("operationId").asString());
         assertEquals(summary, operation.path("summary").asString());

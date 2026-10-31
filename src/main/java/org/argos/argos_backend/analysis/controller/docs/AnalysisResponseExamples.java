@@ -49,4 +49,41 @@ public final class AnalysisResponseExamples {
         "evidenceId":"evidence-1","llmSelected":true,"comparison":{"evidenceId":"evidence-1","stance":"MATCHES","reason":"같은 예산 조정을 보도합니다."}}],
         "selectedEvidenceIds":["evidence-1"],"verdict":"MATCHED","reason":"일치 보도 1건을 확인했습니다.","failure":null}],"error":null}
         """;
+    public static final String TRACE_PERSPECTIVE = """
+        {"analysisId":"a0f02db8-c8af-48db-b9fd-5d6f62303a11","status":"COMPLETED","claims":[{
+        "claimId":"report-1","claimText":"2027년 복지 예산 감소율은 12%다.",
+        "exactQuery":"새빛시 복지 예산 12%","expandedQuery":"새빛시 복지 예산 변화",
+        "issue":{"event":"발표","subject":"새빛시","target":"복지 예산","period":"2027년","metric":"복지 예산",
+        "originalQuote":"새빛시는 2027년 복지 예산 감소율이 12%라고 발표했다.","announcementDate":""},
+        "temporalContext":{"originalPublishedAt":null,"announcementDate":"","announcementDateSource":"UNKNOWN",
+        "targetPeriods":["2027년"],"numericAnchors":["12%"],"eventAnchors":["새빛시","복지 예산","발표"],"action":"NONE"},
+        "neutralQuery":"2027년 12% 새빛시 복지 예산 발표","challengeQuery":"2027년 12% 새빛시 복지 예산 발표 정정",
+        "searches":[
+        {"requestId":"search-1","provider":"NAVER","queryType":"EXACT","query":"새빛시 복지 예산 12%","status":"SUCCEEDED","resultCount":0,"failure":null},
+        {"requestId":"search-2","provider":"BRAVE","queryType":"EXACT","query":"새빛시 복지 예산 12%","status":"SUCCEEDED","resultCount":0,"failure":null},
+        {"requestId":"search-3","provider":"NAVER","queryType":"EXPANDED","query":"새빛시 복지 예산 변화","status":"SUCCEEDED","resultCount":0,"failure":null},
+        {"requestId":"search-4","provider":"BRAVE","queryType":"EXPANDED","query":"새빛시 복지 예산 변화","status":"SUCCEEDED","resultCount":0,"failure":null},
+        {"requestId":"search-5","provider":"NAVER","queryType":"NEUTRAL","query":"2027년 12% 새빛시 복지 예산 발표","status":"SUCCEEDED","resultCount":0,"failure":null},
+        {"requestId":"search-6","provider":"BRAVE","queryType":"CHALLENGE",
+        "query":"2027년 12% 새빛시 복지 예산 발표 정정","status":"SUCCEEDED","resultCount":1,"failure":null}],
+        "candidates":[{"candidateId":"search-6-candidate-1","requestId":"search-6","provider":"BRAVE",
+        "url":"https://other.example.com/a","title":"예산 정정 보도","searchDescription":"예산 관련 검색 요약","searchDateHint":"2026-11-01",
+        "events":[{"stage":"SELECTING_EVIDENCE","code":"PERSPECTIVE_SELECTED","message":"본문 근거가 있는 충돌 후보입니다."}],
+        "evidenceId":"evidence-1","llmSelected":null,"matchResolution":null,
+        "prefetchPriority":{"rank":1,"score":0,"eligible":true,"reasons":["INSUFFICIENT_METADATA_RETAINED"]},
+        "document":{"url":"https://other.example.com/a","title":"예산 보도","publisher":"다른일보","publishedAt":null,"truncated":false},
+        "claimAnalysis":{"evidenceId":"evidence-1","perspective":"CONFLICT_CANDIDATE",
+        "statement":"새빛시의 2027년 복지 예산 감소율은 20%다.","quote":"새빛시의 2027년 복지 예산 감소율은 20%다.",
+        "reason":"동일 쟁점에서 감소율이 다른 후보입니다.","duplicateOfEvidenceId":"","sharedOriginQuote":""},
+        "verificationSelection":{"selected":true,"reason":"본문 근거를 정밀 비교합니다."},
+        "comparison":{"evidenceId":"evidence-1","stance":"CONTRADICTS","reason":"같은 기준에서 감소율이 다릅니다."},
+        "conflictResolution":{"check":{"sameEvent":"SAME","sameSubject":"SAME","sameTarget":"SAME","samePeriod":"SAME",
+        "sameMetric":"SAME","sameUnit":"SAME","sameDenominator":"SAME","sameAggregation":"SAME","sameConditions":"SAME",
+        "mutuallyExclusive":true,"originalQuote":"새빛시는 2027년 복지 예산 감소율이 12%라고 발표했다.",
+        "externalQuote":"새빛시의 2027년 복지 예산 감소율은 20%다.","reason":"같은 대상 기간과 집계 기준입니다."},
+        "accepted":true,"reason":"본문 근거와 동일 비교 조건을 확인했습니다."},
+        "usedQuotes":["새빛시의 2027년 복지 예산 감소율은 20%다."]}],
+        "selectedEvidenceIds":["evidence-1"],"verdict":"CONTRADICTED","reason":"상반 보도 1건을 확인했습니다.",
+        "failure":null,"enrichmentIssues":[]}],"error":null}
+        """;
 }

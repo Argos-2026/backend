@@ -34,6 +34,8 @@ class SearchClientTests {
         assertEquals(items.size(), hits.size());
         assertEquals("https://original.example.com/1", hits.getFirst().url());
         assertEquals("검색 제목", hits.getFirst().title());
+        assertEquals("사용하지 않는 원문 요약", hits.getFirst().description());
+        assertEquals("Tue, 20 Oct 2026 12:00:00 +0900", hits.getFirst().dateHint());
         ArgumentCaptor<URI> requested = ArgumentCaptor.forClass(URI.class);
         verify(calls).request(requested.capture(), eq("GET"), anyMap(), isNull(), eq(Duration.ofSeconds(15)), eq("SEARCH_FAILED"), same(context));
         assertEquals("https://naverapihub.apigw.ntruss.com/search/v1/news", requested.getValue().toString().split("\\?")[0]);

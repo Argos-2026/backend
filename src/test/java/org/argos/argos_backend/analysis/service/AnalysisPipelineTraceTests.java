@@ -23,6 +23,7 @@ import tools.jackson.databind.json.JsonMapper;
 import static org.argos.argos_backend.analysis.domain.AnalysisModels.*;
 import static org.argos.argos_backend.external.llm.LlmModels.*;
 import static org.argos.argos_backend.external.search.SearchClient.Provider.*;
+import static org.argos.argos_backend.support.AnalysisFixtures.confirmedConflict;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -124,7 +125,8 @@ class AnalysisPipelineTraceTests {
             f.fetchFailed.add(url(2));
             f.selected = List.of(new Quote("evidence-1", QUOTE), new Quote("evidence-2", QUOTE));
             f.decisions = List.of(new ReportDecision("evidence-1", DecisionStance.MATCHES, "일치 이유"),
-                new ReportDecision("evidence-2", DecisionStance.CONTRADICTS, "상반 이유"));
+                new ReportDecision("evidence-2", DecisionStance.CONTRADICTS, "상반 이유",
+                    confirmedConflict(f.article.body(), QUOTE)));
             CrossReport report = f.run().crossReports().getFirst();
             assertEquals(ReportVerdict.MIXED, report.verdict());
             assertEquals(1, report.matchingCount()); assertEquals(1, report.contradictingCount());
@@ -223,7 +225,8 @@ class AnalysisPipelineTraceTests {
     void tracePreservesDecisionWithoutChangingVerdictOrAggregation(DecisionStance stance, ReportVerdict verdict,
                                                                   int matching, int contradicting) {
         try (Fixture f = new Fixture()) {
-            f.decisions = List.of(new ReportDecision("evidence-1", stance, "실제 비교 이유"));
+            f.decisions = List.of(new ReportDecision("evidence-1", stance, "실제 비교 이유",
+                stance == DecisionStance.CONTRADICTS ? confirmedConflict(f.article.body(), QUOTE) : null));
             CrossReport report = f.run().crossReports().getFirst();
             assertEquals(verdict, report.verdict());
             assertEquals(matching, report.matchingCount()); assertEquals(contradicting, report.contradictingCount());
