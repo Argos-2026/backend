@@ -2,6 +2,7 @@ package org.argos.argos_backend.analysis.domain;
 
 import java.time.Instant;
 import java.util.*;
+import org.argos.argos_backend.analysis.dto.CrossReportTraceResponse.ClaimTrace;
 
 import static org.argos.argos_backend.analysis.domain.AnalysisModels.*;
 
@@ -17,6 +18,7 @@ public final class AnalysisJob {
     private Issue error;
     private Result result;
     private Thread worker;
+    private List<ClaimTrace> traceClaims = List.of();
     public AnalysisJob(UUID id, String url, Instant createdAt, Instant expiresAt) {
         this.id = id; this.url = url; this.createdAt = createdAt; this.expiresAt = expiresAt;
     }
@@ -37,7 +39,10 @@ public final class AnalysisJob {
     }
     public synchronized Stage currentStage() { return stages.isEmpty() ? Stage.FETCHING_ARTICLE : stages.getFirst(); }
     private synchronized boolean terminal() { return status == Status.COMPLETED || status == Status.PARTIAL_COMPLETED || status == Status.FAILED; }
-    public synchronized Snapshot snapshot() { return new Snapshot(id, url, status, stages, createdAt, expiresAt, warnings, error, result); }
+    public synchronized void trace(List<ClaimTrace> claims) {
+        if (status == Status.RUNNING) traceClaims = List.copyOf(claims);
+    }
+    public synchronized Snapshot snapshot() { return new Snapshot(id, url, status, stages, createdAt, expiresAt, warnings, error, result, traceClaims); }
     public UUID id() { return id; }
     public String url() { return url; }
     public Instant createdAt() { return createdAt; }

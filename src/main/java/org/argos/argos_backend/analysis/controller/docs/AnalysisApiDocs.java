@@ -14,6 +14,9 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import org.argos.argos_backend.analysis.domain.AnalysisModels;
 import org.argos.argos_backend.analysis.dto.AnalysisAcceptedResponse;
 import org.argos.argos_backend.analysis.dto.AnalysisStatusResponse;
+import org.argos.argos_backend.analysis.dto.CrossReportResultResponse;
+import org.argos.argos_backend.analysis.dto.SourceResultResponse;
+import org.argos.argos_backend.analysis.dto.CrossReportTraceResponse;
 import org.argos.argos_backend.global.dto.ApiErrorResponse;
 import org.springframework.http.ResponseEntity;
 import tools.jackson.databind.JsonNode;
@@ -87,7 +90,9 @@ public interface AnalysisApiDocs {
             example = ID_EXAMPLE, schema = @Schema(type = "string", format = "uuid")) String analysisId);
 
     @Operation(operationId = "getAnalysisResult", summary = "분석 결과 조회",
-        description = "완료·부분 완료된 분석의 기사 정보, 교차보도 결과와 주장별 IMVAIN 평가를 반환합니다. "
+        description = "section 기본값 all은 기존 전체 응답을 유지합니다. section=cross-report는 CrossReportResultResponse, "
+            + "section=source는 SourceResultResponse를 반환합니다. 각 부분 응답의 evidence는 해당 영역에서 참조한 근거만 포함하며 warnings와 status는 전체 작업 기준입니다. "
+            + "Swagger 응답 예시와 oneOf 스키마에서 section별 DTO를 확인하세요. 완료·부분 완료된 분석의 기사 정보, 교차보도 결과와 주장별 IMVAIN 평가를 반환합니다. "
             + "두 분석은 같은 기사에서 목적별 주장을 각각 최대 3개씩 독립적으로 선정합니다. "
             + "crossReports의 판정은 MATCHED·CONTRADICTED·MIXED·UNCONFIRMED이며 다른 언론사 보도의 일치 여부만 뜻합니다. "
             + "같은 보도는 실제 사실의 확정이 아닙니다. 검색 실패는 analysisFailed와 warnings로 구분합니다. "
@@ -101,16 +106,14 @@ public interface AnalysisApiDocs {
     @ApiResponses({
         @ApiResponse(responseCode = "200", description = "COMPLETED 또는 PARTIAL_COMPLETED 결과. 부분 완료 시 warnings를 함께 확인하세요.",
             headers = @Header(name = "Cache-Control", schema = @Schema(type = "string", example = "no-store")),
-            content = @Content(mediaType = "application/json", schema = @Schema(implementation = AnalysisModels.Result.class),
-                examples = @ExampleObject(name = "선정된 주장 없음", value = """
-                    {"analysisId":"a0f02db8-c8af-48db-b9fd-5d6f62303a11","status":"COMPLETED",
-                    "article":{"url":"https://news.example.com/articles/12345","title":"기사 제목",
-                    "publisher":"예시 언론사","author":null,"publishedAt":null},
-                    "summary":{"overallComment":"분석할 주장을 찾지 못했습니다.","crossReportOverview":"비교 대상 없음",
-                    "sourceAssessmentOverview":"정보원 평가 대상 없음","unverifiedPoints":[]},
-                    "crossReports":[],"sourceAssessments":[],"evidence":[],"warnings":[]}
-                    """))),
-        @ApiResponse(responseCode = "400", description = "INVALID_ANALYSIS_ID: 표준 UUID 형식이 아닌 분석 ID",
+            content = @Content(mediaType = "application/json",
+                schema = @Schema(oneOf = {AnalysisModels.Result.class, CrossReportResultResponse.class, SourceResultResponse.class}),
+                examples = {
+                    @ExampleObject(name = "all (기본값)", value = AnalysisResponseExamples.ALL),
+                    @ExampleObject(name = "cross-report", value = AnalysisResponseExamples.CROSS_REPORT),
+                    @ExampleObject(name = "source", value = AnalysisResponseExamples.SOURCE)
+                })),
+        @ApiResponse(responseCode = "400", description = "INVALID_ANALYSIS_ID: UUID 형식 오류 / INVALID_SECTION: all·cross-report·source 이외의 section",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = ApiErrorResponse.class))),
         @ApiResponse(responseCode = "404", description = "ANALYSIS_NOT_FOUND: 없는 ID·24시간 만료·서버 재시작으로 유실",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = ApiErrorResponse.class))),
@@ -122,8 +125,34 @@ public interface AnalysisApiDocs {
         @ApiResponse(responseCode = "500", description = "INTERNAL_SERVER_ERROR: 결과 조회 중 서버 오류",
             content = @Content(mediaType = "application/json", schema = @Schema(implementation = ApiErrorResponse.class)))
     })
-    ResponseEntity<AnalysisModels.Result> result(
+    ResponseEntity<?> result(
         @Parameter(name = "analysisId", in = ParameterIn.PATH, required = true, description = "완료·부분 완료된 분석 UUID",
+            example = ID_EXAMPLE, schema = @Schema(type = "string", format = "uuid")) String analysisId,
+        @Parameter(name = "section", in = ParameterIn.QUERY, description = "조회 영역. 생략 시 기존 전체 결과를 반환합니다.",
+            schema = @Schema(type = "string", defaultValue = "all", allowableValues = {"all", "cross-report", "source"})) String section);
+
+    @Operation(operationId = "getCrossReportTrace", summary = "교차검증 Trace 조회",
+        description = "검색·본문 수집·Java 필터링·LLM 선정·비교의 실제 처리 기록을 조회합니다. "
+            + "QUEUED·RUNNING·FAILED 상태도 HTTP 200으로 반환하며 아직 수행하지 않은 단계는 기록하지 않습니다. "
+            + "검색 후보는 검색 결과 출현별로 구분하며 중복 근거는 같은 evidenceId로 연결합니다. "
+            + "COLLECTION_LIMIT_REACHED는 기존 수집 한도로 미처리한 후보입니다. events가 비어 있으면 수집 처리 기록이 없습니다. "
+            + "llmSelected=null은 선정 결과 없음, false는 LLM 미선정입니다. 기존 선정 응답에 이유가 없어 선정 이유는 제공하지 않습니다. "
+            + "UNRELATED 비교도 Trace에 보존하지만 기존 결과 집계에는 포함하지 않습니다. "
+            + "Trace는 최선 노력으로 기록하며 작업과 동일한 메모리·만료 정책을 따릅니다. 저장된 기록만 읽고 외부 API는 호출하지 않습니다.")
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "현재까지 확보된 Trace. error는 작업 전체 실패, claims[].failure는 주장 분석 실패 원인입니다.",
+            headers = @Header(name = "Cache-Control", schema = @Schema(type = "string", example = "no-store")),
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = CrossReportTraceResponse.class),
+                examples = @ExampleObject(name = "검색부터 최종 비교까지", value = AnalysisResponseExamples.TRACE))),
+        @ApiResponse(responseCode = "400", description = "INVALID_ANALYSIS_ID: UUID 형식 오류",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ApiErrorResponse.class))),
+        @ApiResponse(responseCode = "404", description = "ANALYSIS_NOT_FOUND: 없는 ID·만료·서버 재시작으로 유실",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ApiErrorResponse.class))),
+        @ApiResponse(responseCode = "500", description = "INTERNAL_SERVER_ERROR: Trace 조회 중 서버 오류",
+            content = @Content(mediaType = "application/json", schema = @Schema(implementation = ApiErrorResponse.class)))
+    })
+    ResponseEntity<CrossReportTraceResponse> trace(
+        @Parameter(name = "analysisId", in = ParameterIn.PATH, required = true, description = "분석 UUID",
             example = ID_EXAMPLE, schema = @Schema(type = "string", format = "uuid")) String analysisId);
 
     @Schema(name = "AnalysisRequest", description = "뉴스 분석 요청 본문")

@@ -35,5 +35,11 @@ public final class AnalysisModels {
                          List<CrossReport> crossReports, List<SourceAssessment> sourceAssessments,
                          List<Evidence> evidence, List<Issue> warnings) {}
     public record Snapshot(UUID analysisId, String articleUrl, Status status, List<Stage> activeStages,
-                           Instant createdAt, Instant expiresAt, List<Issue> warnings, Issue error, Result result) {}
+                           Instant createdAt, Instant expiresAt, List<Issue> warnings, Issue error, Result result,
+                           List<org.argos.argos_backend.analysis.dto.CrossReportTraceResponse.ClaimTrace> traceClaims) {
+        public Snapshot(UUID analysisId, String articleUrl, Status status, List<Stage> activeStages,
+                        Instant createdAt, Instant expiresAt, List<Issue> warnings, Issue error, Result result) {
+            this(analysisId, articleUrl, status, activeStages, createdAt, expiresAt, warnings, error, result, List.of());
+        }
+    }
 }

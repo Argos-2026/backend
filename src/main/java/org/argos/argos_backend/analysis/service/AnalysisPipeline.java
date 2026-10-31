@@ -9,6 +9,7 @@ import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import org.argos.argos_backend.analysis.domain.AnalysisContext;
 import org.argos.argos_backend.analysis.domain.AnalysisFailure;
+import org.argos.argos_backend.analysis.dto.CrossReportTraceResponse.QueryType;
 import org.argos.argos_backend.external.document.DocumentFetcher;
 import org.argos.argos_backend.external.http.SafeUrlPolicy;
 import org.argos.argos_backend.external.llm.StructuredLlm;
@@ -41,26 +42,44 @@ public class AnalysisPipeline {
         context.stage(Stage.EXTRACTING_CLAIMS);
         Extraction extraction = generate("extract", Map.of("article", article), Extraction.class,
             value -> validateExtraction(value, article), context);
+        for (int i = 0; i < extraction.crossReportClaims().size(); i++) {
+            String claimId = reportId(i);
+            DraftCrossClaim claim = extraction.crossReportClaims().get(i);
+            context.trace(t -> t.claim(claimId, claim.text(), claim.exactQuery(), claim.expandedQuery()));
+        }
         EvidencePool pool = new EvidencePool(article);
         List<CrossReport> crossReports = new ArrayList<>();
         for (int i = 0; i < extraction.crossReportClaims().size(); i++) {
             context.check();
             DraftCrossClaim draft = extraction.crossReportClaims().get(i);
+            String claimId = reportId(i);
             if (nearDeadline(context) && crossReports.stream().anyMatch(r -> !r.analysisFailed())) {
                 context.warn(new Issue("ANALYSIS_TIMEOUT", Stage.RETRIEVING_EVIDENCE,
                     "남은 실행시간이 부족해 일부 교차보도 분석을 생략했습니다."));
-                crossReports.add(new CrossReport(reportId(i), draft.text(), ReportVerdict.UNCONFIRMED,
-                    "실행시간 제한으로 비교를 완료하지 못했습니다.", 0, 0, List.of(), true));
+                context.trace(t -> t.failure(claimId, new Issue("ANALYSIS_TIMEOUT", Stage.RETRIEVING_EVIDENCE,
+                    "남은 실행시간이 부족해 교차보도 분석을 시작하지 못했습니다.")));
+                CrossReport report = new CrossReport(claimId, draft.text(), ReportVerdict.UNCONFIRMED,
+                    "실행시간 제한으로 비교를 완료하지 못했습니다.", 0, 0, List.of(), true);
+                context.trace(t -> t.result(claimId, report));
+                crossReports.add(report);
                 continue;
             }
             try {
-                crossReports.add(analyzeReport(reportId(i), draft, pool, context));
+                CrossReport report = analyzeReport(claimId, draft, pool, context);
+                context.trace(t -> t.result(claimId, report));
+                crossReports.add(report);
             } catch (AnalysisFailure e) {
+                context.trace(t -> t.failure(claimId, e.issue(context.stage())));
                 context.check();
                 context.warn(new Issue(e.code().equals("ANALYSIS_TIMEOUT") ? "ANALYSIS_TIMEOUT" : "CROSS_REPORT_FAILED",
                     context.stage(), "일부 교차보도 분석을 완료하지 못했습니다."));
-                crossReports.add(new CrossReport(reportId(i), draft.text(), ReportVerdict.UNCONFIRMED,
-                    "외부 검색 또는 비교 처리에 실패하여 확인하지 못했습니다.", 0, 0, List.of(), true));
+                CrossReport report = new CrossReport(claimId, draft.text(), ReportVerdict.UNCONFIRMED,
+                    "외부 검색 또는 비교 처리에 실패하여 확인하지 못했습니다.", 0, 0, List.of(), true);
+                context.trace(t -> t.result(claimId, report));
+                crossReports.add(report);
+            } catch (RuntimeException e) {
+                context.trace(t -> t.failure(claimId, safeFailure(e, context.stage())));
+                throw e;
             }
         }
 
@@ -136,18 +155,21 @@ public class AnalysisPipeline {
             new SearchRequest(SearchClient.Provider.BRAVE, claim.exactQuery()),
             new SearchRequest(SearchClient.Provider.NAVER, claim.expandedQuery()),
             new SearchRequest(SearchClient.Provider.BRAVE, claim.expandedQuery()));
-        List<SearchClient.Hit> hits = searchAll(requests, context);
-        List<String> candidates = collect(hits, 10, 10, pool, context, true);
+        List<RetrievedHit> hits = searchAll(requests, context, id);
+        List<String> candidates = collect(hits, 10, 10, pool, context, true, id);
         if (candidates.isEmpty()) return unconfirmed(id, claim.text(), "다른 언론사의 관련 기사 원문을 확보하지 못했습니다.");
         context.stage(Stage.SELECTING_EVIDENCE);
         ReportSelection selected = generate("select", Map.of("claim", claim, "candidates", documents(candidates, pool)),
             ReportSelection.class, s -> validateSelection(s == null ? null : s.evidence(), candidates, 5, pool), context);
         List<String> allowed = selected.evidence().stream().map(Quote::evidenceId).toList();
+        context.trace(t -> t.selection(id, candidates, allowed));
         selected.evidence().forEach(q -> pool.quote(q.evidenceId(), q.quote()));
         if (allowed.isEmpty()) return unconfirmed(id, claim.text(), "주체·시기·지역·수치가 일치하는 비교 기사를 찾지 못했습니다.");
         context.stage(Stage.VERIFYING_CLAIMS);
         ReportReview review = generate("verify", Map.of("claim", claim, "articles", selectedDocuments(allowed, pool)),
             ReportReview.class, r -> validateReportReview(r, allowed), context);
+        context.trace(t -> review.comparisons().forEach(r ->
+            t.comparison(id, r.evidenceId(), r.stance().name(), r.reason())));
         List<ReportComparison> comparisons = review.comparisons().stream()
             .filter(r -> r.stance() != DecisionStance.UNRELATED)
             .map(r -> new ReportComparison(r.evidenceId(), ReportStance.valueOf(r.stance().name()), r.reason())).toList();
@@ -177,10 +199,10 @@ public class AnalysisPipeline {
     private ReviewedSource assessSource(String id, DraftSourceClaim claim, DraftSource source,
                                         EvidencePool pool, AnalysisContext context) {
         context.stage(Stage.ASSESSING_SOURCES);
-        List<SearchClient.Hit> hits = searchAll(List.of(
+        List<RetrievedHit> hits = searchAll(List.of(
             new SearchRequest(SearchClient.Provider.BRAVE, source.identityQuery()),
-            new SearchRequest(SearchClient.Provider.BRAVE, source.quoteQuery())), context);
-        List<String> candidates = collect(hits, 10, 10, pool, context, false);
+            new SearchRequest(SearchClient.Provider.BRAVE, source.quoteQuery())), context, null);
+        List<String> candidates = collect(hits, 10, 10, pool, context, false, null);
         List<Quote> selected = List.of();
         if (!candidates.isEmpty()) {
             SourceSelection selection = generate("source-select",
@@ -207,11 +229,33 @@ public class AnalysisPipeline {
             source.citedInArticle(), "외부 검색 또는 평가 처리에 실패했습니다.", Map.copyOf(unknown), true);
     }
 
-    private List<SearchClient.Hit> searchAll(List<SearchRequest> requests, AnalysisContext context) {
+    private List<RetrievedHit> searchAll(List<SearchRequest> requests, AnalysisContext context, String claimId) {
         ensureBudget(context);
-        List<CompletableFuture<List<SearchClient.Hit>>> tasks = requests.stream().map(request ->
-            CompletableFuture.supplyAsync(() -> search.search(request.provider(), request.query(), 5, context), searches)).toList();
-        List<SearchClient.Hit> hits = new ArrayList<>();
+        List<CompletableFuture<List<RetrievedHit>>> tasks = new ArrayList<>();
+        for (int i = 0; i < requests.size(); i++) {
+            SearchRequest request = requests.get(i);
+            String requestId = "search-" + (i + 1);
+            QueryType type = i < 2 ? QueryType.EXACT : QueryType.EXPANDED;
+            tasks.add(CompletableFuture.supplyAsync(() -> {
+                if (claimId != null) context.trace(t -> t.searchStarted(claimId, requestId, request.provider(), type, request.query()));
+                try {
+                    List<SearchClient.Hit> found = search.search(request.provider(), request.query(), 5, context);
+                    List<RetrievedHit> retrieved = new ArrayList<>();
+                    for (int j = 0; j < found.size(); j++)
+                        retrieved.add(new RetrievedHit(found.get(j), requestId + "-candidate-" + (j + 1)));
+                    if (claimId != null) context.trace(t -> {
+                        t.searchFinished(claimId, requestId, found.size(), null);
+                        retrieved.forEach(hit -> t.candidate(claimId, hit.candidateId(), requestId, request.provider(), hit.hit()));
+                    });
+                    return retrieved;
+                } catch (RuntimeException e) {
+                    if (claimId != null) context.trace(t -> t.searchFinished(claimId, requestId, null,
+                        safeFailure(e, Stage.RETRIEVING_EVIDENCE)));
+                    throw e;
+                }
+            }, searches));
+        }
+        List<RetrievedHit> hits = new ArrayList<>();
         int succeeded = 0;
         for (var task : tasks) {
             try {
@@ -226,43 +270,81 @@ public class AnalysisPipeline {
         return hits;
     }
 
-    private List<String> collect(List<SearchClient.Hit> hits, int maxAttempts, int maxDocuments,
-                                 EvidencePool pool, AnalysisContext context, boolean newsroomOnly) {
+    private List<String> collect(List<RetrievedHit> hits, int maxAttempts, int maxDocuments,
+                                 EvidencePool pool, AnalysisContext context, boolean newsroomOnly, String claimId) {
         LinkedHashSet<String> ids = new LinkedHashSet<>();
         Set<String> visited = new HashSet<>();
         int attempts = 0, failures = 0;
-        for (SearchClient.Hit hit : hits) {
+        for (int index = 0; index < hits.size(); index++) {
+            RetrievedHit retrieved = hits.get(index);
+            SearchClient.Hit hit = retrieved.hit();
             ensureBudget(context);
-            if (attempts >= maxAttempts || ids.size() >= maxDocuments) break;
+            if (attempts >= maxAttempts || ids.size() >= maxDocuments) {
+                for (RetrievedHit skipped : hits.subList(index, hits.size()))
+                    traceEvent(context, claimId, skipped, "COLLECTION_LIMIT_REACHED", "기존 본문 수집 시도 또는 문서 수 한도로 처리하지 않았습니다.");
+                break;
+            }
             String key;
             try { key = canonical(urls.validate(hit.url()).toString()); }
-            catch (ApiException e) { continue; }
-            if (!visited.add(key) || key.equals(canonical(pool.article.url()))) continue;
+            catch (ApiException e) {
+                traceEvent(context, claimId, retrieved, "URL_REJECTED", e.getMessage());
+                continue;
+            }
+            if (!visited.add(key)) {
+                traceEvent(context, claimId, retrieved, "DUPLICATE_URL", "이미 방문한 후보 URL입니다.");
+                continue;
+            }
+            if (key.equals(canonical(pool.article.url()))) {
+                traceEvent(context, claimId, retrieved, "ORIGINAL_ARTICLE_URL", "분석 대상 기사와 같은 URL입니다.");
+                continue;
+            }
             attempts++;
             try {
                 Document doc = pool.cache.get(key);
                 if (doc == null) {
+                    traceEvent(context, claimId, retrieved, "FETCH_STARTED", null);
                     doc = fetcher.fetch(key, false, context);
                     pool.cache.put(key, doc);
+                    traceEvent(context, claimId, retrieved, "FETCH_SUCCEEDED", null);
+                } else traceEvent(context, claimId, retrieved, "DOCUMENT_CACHE_HIT", "이 작업에서 이미 수집한 본문을 재사용했습니다.");
+                if (sameContent(doc.body(), pool.article.body())) {
+                    traceEvent(context, claimId, retrieved, "SAME_CONTENT_AS_ORIGINAL", "분석 대상 기사와 본문이 같습니다.");
+                    continue;
                 }
-                if (sameContent(doc.body(), pool.article.body())) continue;
                 if (newsroomOnly) {
-                    if (sameHost(doc.url(), pool.article.url())) continue;
+                    if (sameHost(doc.url(), pool.article.url())) {
+                        traceEvent(context, claimId, retrieved, "SAME_HOST_AS_ORIGINAL", "분석 대상 기사와 호스트가 같습니다.");
+                        continue;
+                    }
                     String originalPublisher = nonblank(pool.article.publisher())
                         ? pool.article.publisher() : URI.create(pool.article.url()).getHost();
                     String candidatePublisher = nonblank(doc.publisher()) ? doc.publisher() : URI.create(doc.url()).getHost();
-                    if (samePublisher(candidatePublisher, originalPublisher)) continue;
+                    if (samePublisher(candidatePublisher, originalPublisher)) {
+                        traceEvent(context, claimId, retrieved, "SAME_PUBLISHER_AS_ORIGINAL", "분석 대상 기사와 발행 언론사가 같습니다.");
+                        continue;
+                    }
                     if (!nonblank(doc.publisher()))
                         doc = new Document(doc.url(), doc.title(), candidatePublisher, doc.author(),
                             doc.publishedAt(), doc.body(), doc.truncated());
                 }
+                int before = pool.documents.size();
                 String id = pool.add(doc, newsroomOnly);
-                if (id != null) ids.add(id);
+                if (id != null) {
+                    ids.add(id);
+                    if (claimId != null) context.trace(t -> t.evidence(claimId, retrieved.candidateId(), id));
+                    traceEvent(context, claimId, retrieved, pool.documents.size() == before ? "EVIDENCE_REUSED" : "CANDIDATE_ACCEPTED",
+                        pool.documents.size() == before ? "기존 URL 또는 본문과 중복되어 같은 evidenceId로 연결했습니다." : null);
+                }
             } catch (AnalysisFailure e) {
+                traceEvent(context, claimId, retrieved, e.code(), e.issue(context.stage()).message());
                 context.check();
                 failures++;
             } catch (ApiException e) {
+                traceEvent(context, claimId, retrieved, "FETCH_URL_REJECTED", e.getMessage());
                 // Unsafe redirect destinations are excluded.
+            } catch (RuntimeException e) {
+                traceEvent(context, claimId, retrieved, "CANDIDATE_PROCESSING_FAILED", safeFailure(e, context.stage()).message());
+                throw e;
             }
         }
         if (attempts > 0 && failures == attempts)
@@ -270,6 +352,17 @@ public class AnalysisPipeline {
         if (failures > 0) context.warn(new Issue("ARTICLE_FETCH_FAILED", context.stage(), "일부 외부 자료의 원문을 확보하지 못했습니다."));
         return List.copyOf(ids);
     }
+
+    private static void traceEvent(AnalysisContext context, String claimId, RetrievedHit hit, String code, String message) {
+        if (claimId != null) context.trace(t -> t.event(claimId, hit.candidateId(), code, message));
+    }
+    private static Issue safeFailure(RuntimeException failure, Stage stage) {
+        if (failure instanceof AnalysisFailure known) return known.issue(stage);
+        if (failure instanceof ApiException known) return new Issue(known.code(), stage, known.getMessage());
+        // Never persist arbitrary exception messages, remote bodies, headers, or credentials.
+        return new Issue("INTERNAL_SERVER_ERROR", stage, "처리 중 예기치 않은 오류가 발생했습니다. (" + failure.getClass().getSimpleName() + ")");
+    }
+    private record RetrievedHit(SearchClient.Hit hit, String candidateId) {}
 
     private List<Map<String, Object>> documents(List<String> ids, EvidencePool pool) {
         return ids.stream().map(id -> Map.<String, Object>of("evidenceId", id, "document", pool.documents.get(id))).toList();

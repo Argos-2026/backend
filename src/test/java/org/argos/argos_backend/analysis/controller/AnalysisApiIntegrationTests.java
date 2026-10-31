@@ -176,6 +176,16 @@ class AnalysisApiIntegrationTests {
         assertTrue(result.has("sourceAssessments"));
         assertFalse(result.has("claims"));
         assertFalse(result.has("articleSources"));
+        int previousSearchCalls = searchCalls.get();
+        var traceResponse = get(job.analysisId() + "/cross-report/trace");
+        assertEquals(200, traceResponse.statusCode());
+        JsonNode trace = json.readTree(traceResponse.body()).path("claims").get(0);
+        assertEquals("report-1", trace.path("claimId").asString());
+        assertEquals(4, trace.path("searches").size());
+        assertEquals(4, trace.path("candidates").size());
+        assertEquals("evidence-1", trace.path("selectedEvidenceIds").get(0).asString());
+        assertEquals(previousSearchCalls, searchCalls.get());
+        assertFalse(traceResponse.body().contains(REPORT_QUOTE));
     }
 
     @Test void mixedReportsCountMatchingAndContradictingArticles() throws Exception {
@@ -309,6 +319,18 @@ class AnalysisApiIntegrationTests {
         Snapshot job = submitAndWait();
         assertEquals(Status.FAILED, job.status());
         assertEquals("ANALYSIS_FAILED", job.error().code());
+        var response = get(job.analysisId() + "/cross-report/trace");
+        assertEquals(200, response.statusCode());
+        JsonNode trace = json.readTree(response.body());
+        assertEquals("FAILED", trace.path("status").asString());
+        JsonNode claim = trace.path("claims").get(0);
+        assertEquals("새빛시 복지 예산 12% 감소", claim.path("exactQuery").asString());
+        assertEquals("SEARCH_FAILED", claim.path("failure").path("code").asString());
+        assertEquals(4, claim.path("searches").size());
+        for (JsonNode request : claim.path("searches")) assertEquals("FAILED", request.path("status").asString());
+        assertFalse(response.body().contains("test-openai"));
+        assertFalse(response.body().contains("test-secret"));
+        assertFalse(response.body().contains("test-brave"));
     }
 
     private Extraction extraction() {
