@@ -65,9 +65,9 @@ class DemoAnalysisApiIntegrationTests {
         assertEquals("COMPLETED", result.path("status").asString());
         assertEquals(Set.of("analysisId", "status", "article", "summary", "crossReports", "sourceAssessments", "evidence", "warnings"), fields(result));
         assertEquals("서울 아파트값 0.18%↑…상승폭 둔화속 42주 연속 올라", result.path("article").path("title").asString());
-        assertEquals(4, result.path("crossReports").size());
+        assertEquals(7, result.path("crossReports").size());
         assertEquals(2, result.path("sourceAssessments").size());
-        assertEquals(12, result.path("evidence").size());
+        assertEquals(13, result.path("evidence").size());
         assertTrue(result.path("warnings").isEmpty());
     }
 
