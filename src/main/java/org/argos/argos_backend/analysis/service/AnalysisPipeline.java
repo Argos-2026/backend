@@ -7,6 +7,8 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.argos.argos_backend.analysis.domain.AnalysisContext;
 import org.argos.argos_backend.analysis.domain.AnalysisFailure;
 import org.argos.argos_backend.analysis.dto.CrossReportTraceResponse.QueryType;
@@ -25,6 +27,9 @@ import static org.argos.argos_backend.external.llm.LlmModels.*;
 
 @Component
 public class AnalysisPipeline {
+    private static final Pattern INTERNAL_SUMMARY_REFERENCE = Pattern.compile(
+        "(?i)(?<![\\p{L}\\p{N}_-])(?:source-claim-\\d+|source-\\d+-\\d+|report-\\d+|evidence-\\d+|candidate-\\d+|search-\\d+(?:-candidate-\\d+)?)(?![\\p{L}\\p{N}_-])(?:\\s*\\([^()\\r\\n]*\\))?");
+
     private final DocumentFetcher fetcher;
     private final SearchClient search;
     private final StructuredLlm llm;
@@ -127,15 +132,15 @@ public class AnalysisPipeline {
         try {
             if (nearDeadline(context)) throw new AnalysisFailure("LLM_FAILED", "종합 요약을 생성할 시간이 부족합니다.");
             var input = new LinkedHashMap<String, Object>();
-            input.put("crossReports", crossReports);
-            input.put("sourceAssessments", sourceAssessments);
+            input.put("crossReports", summaryCrossReports(crossReports));
+            input.put("sourceAssessments", summarySourceAssessments(sourceAssessments));
             input.put("limitations", limitations);
             input.put("warnings", context.warnings());
             OverallSummary generated = generate("summarize", input, OverallSummary.class, this::validateSummary, context);
             List<String> points = new ArrayList<>(generated.unverifiedPoints());
             for (String limitation : limitations) if (!points.contains(limitation)) points.add(limitation);
-            summary = new Summary(generated.overallComment(), generated.crossReportOverview(),
-                generated.sourceAssessmentOverview(), List.copyOf(points));
+            summary = new Summary(generated.overallComment(), hideInternalSummaryReferences(generated.crossReportOverview()),
+                hideInternalSummaryReferences(generated.sourceAssessmentOverview()), List.copyOf(points));
         } catch (AnalysisFailure e) {
             context.check();
             context.warn(new Issue("LLM_FAILED", Stage.AGGREGATING_RESULT, "종합 요약 생성에 실패해 기본 요약을 사용했습니다."));
@@ -147,6 +152,64 @@ public class AnalysisPipeline {
         Status status = context.warnings().isEmpty() ? Status.COMPLETED : Status.PARTIAL_COMPLETED;
         return new Result(id, status, article.article(), summary, List.copyOf(crossReports),
             List.copyOf(sourceAssessments), pool.usedEvidence(crossReports, sourceAssessments), context.warnings());
+    }
+
+    private List<Map<String, Object>> summaryCrossReports(List<CrossReport> reports) {
+        return reports.stream().map(report -> {
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("text", report.text());
+            value.put("verdict", report.verdict());
+            value.put("reason", report.reason());
+            value.put("matchingCount", report.matchingCount());
+            value.put("contradictingCount", report.contradictingCount());
+            value.put("comparisons", report.comparisons().stream().map(comparison -> {
+                Map<String, Object> comparisonValue = new LinkedHashMap<>();
+                comparisonValue.put("stance", comparison.stance());
+                comparisonValue.put("reason", comparison.reason());
+                return comparisonValue;
+            }).toList());
+            value.put("analysisFailed", report.analysisFailed());
+            return value;
+        }).toList();
+    }
+
+    private List<Map<String, Object>> summarySourceAssessments(List<SourceAssessment> assessments) {
+        return assessments.stream().map(assessment -> {
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("text", assessment.text());
+            value.put("sources", assessment.sources().stream().map(source -> {
+                Map<String, Object> sourceValue = new LinkedHashMap<>();
+                sourceValue.put("name", source.name());
+                sourceValue.put("affiliation", source.affiliation());
+                sourceValue.put("type", source.type());
+                sourceValue.put("citedInArticle", source.citedInArticle());
+                sourceValue.put("verificationNote", source.verificationNote());
+                sourceValue.put("imvain", source.imvain().entrySet().stream().collect(Collectors.toMap(
+                    Map.Entry::getKey,
+                    entry -> Map.of("status", entry.getValue().status(), "reason", entry.getValue().reason()),
+                    (first, ignored) -> first,
+                    LinkedHashMap::new)));
+                sourceValue.put("assessmentFailed", source.assessmentFailed());
+                return sourceValue;
+            }).toList());
+            return value;
+        }).toList();
+    }
+
+    static String hideInternalSummaryReferences(String value) {
+        if (value == null) return null;
+        Matcher matcher = INTERNAL_SUMMARY_REFERENCE.matcher(value);
+        StringBuffer sanitized = new StringBuffer();
+        while (matcher.find()) {
+            String match = matcher.group();
+            int opening = match.indexOf('(');
+            int closing = match.lastIndexOf(')');
+            String replacement = opening >= 0 && closing > opening
+                ? match.substring(opening + 1, closing) : "";
+            matcher.appendReplacement(sanitized, Matcher.quoteReplacement(replacement));
+        }
+        matcher.appendTail(sanitized);
+        return sanitized.toString().replaceAll("[ \\t]{2,}", " ").trim();
     }
 
     private CrossReport analyzeReport(String id, DraftCrossClaim claim, EvidencePool pool, AnalysisContext context) {

@@ -1,3 +1,4 @@
 교차보도 결과와 IMVAIN 정보원 평가를 목적에 맞게 구분하여 간결하게 요약하세요.
 overallComment는 전체 코멘트, crossReportOverview는 다른 언론사의 일치·상반·혼재·확인 불가 결과 요약, sourceAssessmentOverview는 주장별 정보원 평가 요약입니다. unverifiedPoints에는 근거 부족·부분 실패·자료 범위 제한을 넣으세요.
 교차보도 일치를 실제 사실의 확정이나 진실 판정으로 표현하지 마세요. 평가 결과·경고와 모순되는 요약을 만들지 마세요.
+crossReportOverview와 sourceAssessmentOverview는 사용자에게 직접 표시되는 문장입니다. 내부 식별자나 변수명(report-1, source-claim-1, source-1-1, evidence-1 등)을 절대 출력하지 마세요. `report-1(주장 내용)`처럼 내부 ID와 괄호를 함께 쓰는 형식도 금지합니다. 주장·정보원은 입력의 text·name을 자연어로 직접 지칭하고, 내부 ID 없이 요약하세요.
