@@ -1,6 +1,11 @@
 package org.argos.argos_backend.analysis.service;
 
 import java.util.UUID;
+import java.util.Set;
+import java.util.HashSet;
+import org.argos.argos_backend.analysis.dto.CrossReportResultResponse;
+import org.argos.argos_backend.analysis.dto.SourceResultResponse;
+import org.argos.argos_backend.analysis.dto.CrossReportTraceResponse;
 import org.argos.argos_backend.analysis.dto.AnalysisStatusResponse;
 import org.argos.argos_backend.analysis.repository.AnalysisStore;
 import org.argos.argos_backend.global.exception.ApiException;
@@ -33,6 +38,30 @@ public class AnalysisQueryService {
                 yield result;
             }
         };
+    }
+
+    public Object result(String analysisId, String section) {
+        if (!Set.of("all", "cross-report", "source").contains(section))
+            throw new ApiException(400, "INVALID_SECTION", "section은 all, cross-report, source 중 하나여야 합니다.");
+        Result result = result(analysisId);
+        if (section.equals("all")) return result;
+        Set<String> evidenceIds = new HashSet<>();
+        if (section.equals("cross-report")) {
+            result.crossReports().forEach(r -> r.comparisons().forEach(c -> evidenceIds.add(c.evidenceId())));
+            return new CrossReportResultResponse(result.analysisId(), result.status(), result.article(),
+                result.summary().crossReportOverview(), result.crossReports(),
+                result.evidence().stream().filter(e -> evidenceIds.contains(e.evidenceId())).toList(), result.warnings());
+        }
+        result.sourceAssessments().forEach(a -> a.sources().forEach(s ->
+            s.imvain().values().forEach(c -> evidenceIds.addAll(c.evidenceIds()))));
+        return new SourceResultResponse(result.analysisId(), result.status(), result.article(),
+            result.summary().sourceAssessmentOverview(), result.sourceAssessments(),
+            result.evidence().stream().filter(e -> evidenceIds.contains(e.evidenceId())).toList(), result.warnings());
+    }
+
+    public CrossReportTraceResponse trace(String analysisId) {
+        Snapshot snapshot = find(analysisId);
+        return new CrossReportTraceResponse(snapshot.analysisId(), snapshot.status(), snapshot.traceClaims(), snapshot.error());
     }
 
     Snapshot find(String analysisId) {

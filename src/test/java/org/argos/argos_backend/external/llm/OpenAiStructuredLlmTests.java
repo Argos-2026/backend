@@ -44,6 +44,20 @@ class OpenAiStructuredLlmTests {
         verify(calls, times(2)).request(any(), eq("POST"), anyMap(), any(), any(), eq("LLM_FAILED"), any());
     }
 
+    @Test void malformedAndIncompletePerspectiveResponsesFailSafelyAfterOneRetry() {
+        for (String content : List.of("{broken", "{\"candidates\":[]}", "{}")) {
+            reset(calls);
+            when(calls.request(any(), eq("POST"), anyMap(), any(), any(), eq("LLM_FAILED"), any()))
+                .thenReturn(response(content));
+            AnalysisFailure failure = assertThrows(AnalysisFailure.class, () -> llm.generate("perspectives", "{}",
+                PerspectiveSelection.class, value -> {
+                    if (value.candidates() == null || value.candidates().size() != 1) throw new IllegalArgumentException();
+                }, context()));
+            assertEquals("LLM_FAILED", failure.code());
+            verify(calls, times(2)).request(any(), eq("POST"), anyMap(), any(), any(), eq("LLM_FAILED"), any());
+        }
+    }
+
     private WebTransport.Response response(String content) {
         return new WebTransport.Response(200, "application/json", null,
             json.writeValueAsBytes(Map.of("status", "completed", "output",

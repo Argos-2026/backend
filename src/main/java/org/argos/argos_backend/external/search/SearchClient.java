@@ -16,7 +16,9 @@ import tools.jackson.databind.json.JsonMapper;
 @Component
 public class SearchClient {
     public enum Provider { NAVER, BRAVE }
-    public record Hit(String url, String title) {}
+    public record Hit(String url, String title, String description, String dateHint) {
+        public Hit(String url, String title) { this(url, title, "", ""); }
+    }
     private final ExternalCalls calls;
     private final ArgosProperties properties;
     private final JsonMapper json;
@@ -45,7 +47,10 @@ public class SearchClient {
                 String url = provider == Provider.NAVER
                     ? DocumentFetcher.first(item.path("originallink").asString(""), item.path("link").asString(""))
                     : item.path("url").asString("");
-                if (url != null && !url.isBlank()) hits.add(new Hit(url, org.jsoup.Jsoup.parse(item.path("title").asString("")).text()));
+                if (url != null && !url.isBlank()) hits.add(new Hit(url,
+                    org.jsoup.Jsoup.parse(item.path("title").asString("")).text(),
+                    org.jsoup.Jsoup.parse(item.path("description").asString("")).text(),
+                    item.path(provider == Provider.NAVER ? "pubDate" : "page_age").asString("")));
                 if (hits.size() >= count) break;
             }
             return List.copyOf(hits);

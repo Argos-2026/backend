@@ -1,6 +1,6 @@
 package org.argos.argos_backend.analysis.controller;
 
-import org.argos.argos_backend.analysis.domain.AnalysisModels;
+import org.argos.argos_backend.analysis.dto.CrossReportTraceResponse;
 import org.argos.argos_backend.analysis.controller.docs.AnalysisApiDocs;
 import org.argos.argos_backend.analysis.dto.AnalysisAcceptedResponse;
 import org.argos.argos_backend.analysis.dto.AnalysisStatusResponse;
@@ -30,8 +30,15 @@ public class AnalysisController implements AnalysisApiDocs {
 
     @GetMapping(value = "/{analysisId}/result", produces = MediaType.APPLICATION_JSON_VALUE)
     @Override
-    public ResponseEntity<AnalysisModels.Result> result(@PathVariable String analysisId) {
-        return ResponseEntity.ok().header("Cache-Control", "no-store").body(queries.result(analysisId));
+    public ResponseEntity<?> result(@PathVariable String analysisId,
+                                     @RequestParam(defaultValue = "all") String section) {
+        return ResponseEntity.ok().header("Cache-Control", "no-store").body(queries.result(analysisId, section));
+    }
+
+    @GetMapping(value = "/{analysisId}/cross-report/trace", produces = MediaType.APPLICATION_JSON_VALUE)
+    @Override
+    public ResponseEntity<CrossReportTraceResponse> trace(@PathVariable String analysisId) {
+        return ResponseEntity.ok().header("Cache-Control", "no-store").body(queries.trace(analysisId));
     }
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)

@@ -22,6 +22,17 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 class AnalysisPipelineTests {
+    @Test void hidesInternalIdsFromUserFacingSummaryText() {
+        assertEquals("경찰의 병원 압수수색", AnalysisPipeline.hideInternalSummaryReferences(
+            "report-1(경찰의 병원 압수수색)"));
+        assertEquals("기관의 설명과 비교했습니다.", AnalysisPipeline.hideInternalSummaryReferences(
+            "source-claim-1(기관의 설명)과 비교했습니다."));
+        assertEquals("관련 결과를 확인했습니다.", AnalysisPipeline.hideInternalSummaryReferences(
+            "관련 결과를 확인했습니다. evidence-1"));
+        assertFalse(AnalysisPipeline.hideInternalSummaryReferences(
+            "report-1 source-claim-1 source-1-1 evidence-1").matches(".*(?:report|source|evidence)-\\d+.*"));
+    }
+
     @Test void deduplicatesReprintsAndNormalizesTrackingUrls() {
         String story = "이것은 동일한 기사 본문이며 원문 기사와 재게시 기사에 공통으로 실린 내용입니다. ".repeat(5);
         assertTrue(AnalysisPipeline.sameContent(story, "  " + story + "\n"));

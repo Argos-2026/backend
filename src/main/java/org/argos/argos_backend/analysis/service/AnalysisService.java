@@ -61,7 +61,7 @@ public class AnalysisService {
         if (job.expiresAt().isBefore(deadline)) deadline = job.expiresAt();
         AnalysisContext context = new AnalysisContext(clock, deadline, stage -> {
             job.stage(stage); log.info("Analysis id={} stage={}", job.id(), stage);
-        });
+        }, job::trace);
         ScheduledFuture<?> timeout = null;
         try {
             timeout = timer.schedule(() -> {

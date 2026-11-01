@@ -6,9 +6,16 @@ import java.util.UUID;
 import org.argos.argos_backend.global.config.ArgosProperties;
 
 import static org.argos.argos_backend.analysis.domain.AnalysisModels.*;
+import static org.argos.argos_backend.analysis.domain.ReportingModels.*;
 
 public final class AnalysisFixtures {
     private AnalysisFixtures() {}
+
+    public static ConflictCheck confirmedConflict(String originalQuote, String externalQuote) {
+        return new ConflictCheck(ScopeMatch.SAME, ScopeMatch.SAME, ScopeMatch.SAME, ScopeMatch.SAME,
+            ScopeMatch.SAME, ScopeMatch.SAME, ScopeMatch.SAME, ScopeMatch.SAME, ScopeMatch.SAME,
+            true, originalQuote, externalQuote, "동일 대상·기간·단위·분모·집계 기준에서 수치가 양립 불가능합니다.");
+    }
 
     public static ArgosProperties properties(int maxJobs, Duration timeout, boolean keys) {
         return new ArgosProperties(keys ? "test" : "", "gpt-5.4-mini", "test", "test", "test", 1, 1, maxJobs, timeout, Duration.ofHours(24));

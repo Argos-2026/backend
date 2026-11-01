@@ -47,6 +47,7 @@ class AnalysisResultApiIntegrationTests {
         var second = get(job.id().toString());
         assertEquals(200, first.statusCode());
         assertEquals(first.body(), second.body());
+        assertEquals(first.body(), getPath(job.id() + "/result?section=all").body());
         assertEquals("no-store", first.headers().firstValue("Cache-Control").orElseThrow());
         assertTrue(first.headers().firstValue("Content-Type").orElseThrow().startsWith("application/json"));
         JsonNode result = json.readTree(first.body());
@@ -63,6 +64,81 @@ class AnalysisResultApiIntegrationTests {
         assertEquals(6, result.path("sourceAssessments").get(0).path("sources").get(0).path("imvain").size());
         assertEquals("확인한 원문 문장입니다.", result.path("evidence").get(0).path("excerpt").asString());
         verifyNoInteractions(pipeline);
+    }
+
+    @Test void sectionResponsesUseDedicatedFieldsAndOnlyReferencedEvidence() throws Exception {
+        AnalysisJob job = complete(false);
+        JsonNode all = json.readTree(get(job.id().toString()).body());
+        var crossResponse = getPath(job.id() + "/result?section=cross-report");
+        var sourceResponse = getPath(job.id() + "/result?section=source");
+        assertEquals(200, crossResponse.statusCode()); assertEquals(200, sourceResponse.statusCode());
+        JsonNode cross = json.readTree(crossResponse.body()), source = json.readTree(sourceResponse.body());
+        assertEquals(Set.of("analysisId", "status", "article", "crossReportOverview", "crossReports", "evidence", "warnings"), fields(cross));
+        assertEquals(Set.of("analysisId", "status", "article", "sourceAssessmentOverview", "sourceAssessments", "evidence", "warnings"), fields(source));
+        assertEquals(all.path("crossReports"), cross.path("crossReports"));
+        assertEquals(all.path("sourceAssessments"), source.path("sourceAssessments"));
+        assertEquals(all.path("summary").path("crossReportOverview"), cross.path("crossReportOverview"));
+        assertEquals(all.path("summary").path("sourceAssessmentOverview"), source.path("sourceAssessmentOverview"));
+        assertEquals(1, cross.path("evidence").size()); assertEquals(1, source.path("evidence").size());
+        assertEquals("evidence-1", cross.path("evidence").get(0).path("evidenceId").asString());
+        assertEquals("evidence-2", source.path("evidence").get(0).path("evidenceId").asString());
+        assertEquals("no-store", crossResponse.headers().firstValue("Cache-Control").orElseThrow());
+        assertEquals("no-store", sourceResponse.headers().firstValue("Cache-Control").orElseThrow());
+        verifyNoInteractions(pipeline);
+    }
+
+    @Test void invalidSectionReturnsDocumentedBadRequest() throws Exception {
+        AnalysisJob job = complete(false);
+        assertError(getPath(job.id() + "/result?section=unknown"), 400, "INVALID_SECTION");
+        verifyNoInteractions(pipeline);
+    }
+
+    @Test void partialSectionsPreserveGlobalStatusWarningsAndFailedAssessment() throws Exception {
+        AnalysisJob job = complete(true);
+        JsonNode cross = json.readTree(getPath(job.id() + "/result?section=cross-report").body());
+        JsonNode source = json.readTree(getPath(job.id() + "/result?section=source").body());
+        assertEquals("PARTIAL_COMPLETED", cross.path("status").asString());
+        assertEquals(cross.path("warnings"), source.path("warnings"));
+        assertTrue(source.path("sourceAssessments").get(0).path("sources").get(0).path("assessmentFailed").asBoolean());
+        assertTrue(source.path("evidence").isEmpty());
+    }
+
+    @Test void traceIsReadableInEveryJobStateWithoutReanalysis() throws Exception {
+        AnalysisJob job = store.create("https://example.com/article");
+        assertEquals("QUEUED", json.readTree(getPath(job.id() + "/cross-report/trace").body()).path("status").asString());
+        job.start();
+        var context = new org.argos.argos_backend.analysis.domain.AnalysisContext(clock, now.get().plusSeconds(600), job::stage, job::trace);
+        context.trace(t -> t.claim("report-1", "검증 대상", "실제 exact", "실제 expanded"));
+        var running = getPath(job.id() + "/cross-report/trace");
+        assertEquals(200, running.statusCode());
+        JsonNode trace = json.readTree(running.body());
+        assertEquals("RUNNING", trace.path("status").asString());
+        assertEquals("실제 exact", trace.path("claims").get(0).path("exactQuery").asString());
+        assertTrue(trace.path("claims").get(0).path("searches").isEmpty());
+        job.fail(new Issue("ANALYSIS_TIMEOUT", Stage.RETRIEVING_EVIDENCE, "제한시간 초과"), List.of(), false);
+        JsonNode failed = json.readTree(getPath(job.id() + "/cross-report/trace").body());
+        assertEquals("FAILED", failed.path("status").asString());
+        assertEquals("ANALYSIS_TIMEOUT", failed.path("error").path("code").asString());
+        assertEquals(trace.path("claims"), failed.path("claims"));
+        assertError(get(job.id().toString()), 409, "ANALYSIS_FAILED");
+        var completed = getPath(complete(false).id() + "/cross-report/trace");
+        assertEquals(200, completed.statusCode());
+        assertEquals("no-store", completed.headers().firstValue("Cache-Control").orElseThrow());
+        assertFalse(completed.body().contains("private-internal-url"));
+        assertError(getPath("invalid/cross-report/trace"), 400, "INVALID_ANALYSIS_ID");
+        assertError(getPath(UUID.randomUUID() + "/cross-report/trace"), 404, "ANALYSIS_NOT_FOUND");
+        now.set(now.get().plus(Duration.ofHours(24)));
+        assertError(getPath(job.id() + "/cross-report/trace"), 404, "ANALYSIS_NOT_FOUND");
+        verifyNoInteractions(pipeline);
+    }
+
+    @Test void sectionResultsKeepExistingNotReadyAndFailedErrors() throws Exception {
+        AnalysisJob job = store.create("https://example.com/article");
+        for (String section : List.of("all", "cross-report", "source"))
+            assertError(getPath(job.id() + "/result?section=" + section), 409, "ANALYSIS_NOT_READY");
+        job.start(); job.fail(new Issue("LLM_FAILED", Stage.SELECTING_EVIDENCE, "실패"), List.of(), false);
+        for (String section : List.of("all", "cross-report", "source"))
+            assertError(getPath(job.id() + "/result?section=" + section), 409, "ANALYSIS_FAILED");
     }
 
     @Test void partialResultPreservesReportsAndFailedSourceAssessment() throws Exception {
@@ -169,7 +245,7 @@ class AnalysisResultApiIntegrationTests {
     private AnalysisJob complete(boolean partial) {
         AnalysisJob job = store.create("https://example.com/article");
         job.start();
-        Criterion criterion = new Criterion(CriterionStatus.MET, "원문에서 확인했습니다.", List.of("evidence-1"));
+        Criterion criterion = new Criterion(CriterionStatus.MET, "원문에서 확인했습니다.", List.of("evidence-2"));
         Map<String, Criterion> criteria = new LinkedHashMap<>(); CRITERIA.forEach(key -> criteria.put(key, criterion));
         job.complete(new Result(job.id(), partial ? Status.PARTIAL_COMPLETED : Status.COMPLETED,
             new Article("https://example.com/article", "기사 제목", "언론사", null, null),
@@ -181,9 +257,16 @@ class AnalysisResultApiIntegrationTests {
                     "기사 내 인용", partial ? "평가 실패" : "확인 결과",
                     partial ? CRITERIA.stream().collect(java.util.stream.Collectors.toMap(k -> k,
                         k -> new Criterion(CriterionStatus.UNKNOWN, "평가 실패", List.of()))) : Map.copyOf(criteria), partial)))),
-            List.of(new Evidence("evidence-1", "근거 제목", "발행 기관", "https://docs.example.com/a", null, "확인한 원문 문장입니다.")),
+            List.of(new Evidence("evidence-1", "근거 제목", "발행 기관", "https://docs.example.com/a", null, "확인한 원문 문장입니다."),
+                new Evidence("evidence-2", "정보원 근거", "발행 기관", "https://docs.example.com/source", null, "정보원 발췌")),
             partial ? List.of(new Issue("SOURCE_ASSESSMENT_FAILED", Stage.ASSESSING_SOURCES, "평가 실패")) : List.of()));
         return job;
+    }
+    private Set<String> fields(JsonNode object) {
+        Set<String> names = new HashSet<>(); object.propertyNames().forEach(names::add); return names;
+    }
+    private HttpResponse<String> getPath(String path) throws Exception {
+        return http.send(HttpRequest.newBuilder(URI.create(base() + "/" + path)).GET().build(), HttpResponse.BodyHandlers.ofString());
     }
     private URI base() { return URI.create("http://localhost:" + port + "/api/v1/analyses"); }
     private URI resultUri(String id) { return URI.create(base() + "/" + id + "/result"); }

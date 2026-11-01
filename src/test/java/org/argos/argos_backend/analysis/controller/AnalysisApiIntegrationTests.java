@@ -20,6 +20,8 @@ import tools.jackson.databind.json.JsonMapper;
 
 import static org.argos.argos_backend.analysis.domain.AnalysisModels.*;
 import static org.argos.argos_backend.external.llm.LlmModels.*;
+import static org.argos.argos_backend.support.AnalysisFixtures.confirmedConflict;
+import static org.argos.argos_backend.analysis.domain.ReportingModels.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -108,7 +110,7 @@ class AnalysisApiIntegrationTests {
                             : java.util.stream.IntStream.rangeClosed(6, 9).mapToObj(i -> hit("https://other.example.com/fail-" + i))
                                 .collect(java.util.stream.Collectors.collectingAndThen(java.util.stream.Collectors.toList(),
                                     list -> { list.add(hit(REPORT)); return list; }))
-                        : scenario.equals("mixed") ? List.of(hit(REPORT), hit(REPORT2))
+                        : scenario.equals("mixed") || scenario.equals("perspective") ? List.of(hit(REPORT), hit(REPORT2))
                         : scenario.equals("contradicted") ? List.of(hit(REPORT2)) : List.of(hit(REPORT));
                     return response(200, uri.getHost().contains("ntruss") ? Map.of("items", hits)
                         : Map.of("web", Map.of("results", hits)));
@@ -129,16 +131,29 @@ class AnalysisApiIntegrationTests {
                     : scenario.equals("mixed")
                     ? List.of(new Quote("evidence-1", REPORT_QUOTE), new Quote("evidence-2", CONTRARY_QUOTE))
                     : List.of(new Quote("evidence-1", REPORT_QUOTE)));
+                case "perspectives" -> {
+                    List<CandidateClaim> candidates = new ArrayList<>();
+                    for (JsonNode c : json.readTree(input).path("candidates")) {
+                        boolean contrary = c.path("document").path("url").asString().equals(REPORT2);
+                        String quote = contrary ? CONTRARY_QUOTE : REPORT_QUOTE;
+                        candidates.add(new CandidateClaim(c.path("evidenceId").asString(),
+                            contrary ? Perspective.CONFLICT_CANDIDATE : Perspective.SUPPORT_CANDIDATE,
+                            quote, quote, "본문에 근거한 후보 분류", "", ""));
+                    }
+                    yield new PerspectiveSelection(candidates);
+                }
                 case "verify" -> new ReportReview(scenario.equals("unrelated")
                     ? List.of(new ReportDecision("evidence-1", DecisionStance.UNRELATED, "다른 사건입니다."))
                     : scenario.equals("contradicted")
-                    ? List.of(new ReportDecision("evidence-1", DecisionStance.CONTRADICTS, "감소율이 다릅니다."))
+                    ? List.of(new ReportDecision("evidence-1", DecisionStance.CONTRADICTS, "감소율이 다릅니다.",
+                        confirmedConflict(ARTICLE_QUOTE, CONTRARY_QUOTE)))
                     : scenario.equals("six-candidates")
                     ? java.util.stream.IntStream.rangeClosed(1, 5)
                         .mapToObj(i -> new ReportDecision("evidence-" + i, DecisionStance.MATCHES, "12%가 같습니다.")).toList()
-                    : scenario.equals("mixed")
+                    : scenario.equals("mixed") || scenario.equals("perspective")
                     ? List.of(new ReportDecision("evidence-1", DecisionStance.MATCHES, "12%가 같습니다."),
-                        new ReportDecision("evidence-2", DecisionStance.CONTRADICTS, "20%로 다릅니다."))
+                        new ReportDecision("evidence-2", DecisionStance.CONTRADICTS, "20%로 다릅니다.",
+                            confirmedConflict(ARTICLE_QUOTE, CONTRARY_QUOTE)))
                     : List.of(new ReportDecision("evidence-1", DecisionStance.MATCHES, "12%가 같습니다.")));
                 case "source-select" -> new SourceSelection(scenario.equals("source-four-candidates")
                     ? java.util.stream.IntStream.rangeClosed(2, 4)
@@ -176,6 +191,17 @@ class AnalysisApiIntegrationTests {
         assertTrue(result.has("sourceAssessments"));
         assertFalse(result.has("claims"));
         assertFalse(result.has("articleSources"));
+        int previousSearchCalls = searchCalls.get();
+        var traceResponse = get(job.analysisId() + "/cross-report/trace");
+        assertEquals(200, traceResponse.statusCode());
+        JsonNode trace = json.readTree(traceResponse.body()).path("claims").get(0);
+        assertEquals("report-1", trace.path("claimId").asString());
+        assertEquals(4, trace.path("searches").size());
+        assertEquals(4, trace.path("candidates").size());
+        assertEquals("evidence-1", trace.path("selectedEvidenceIds").get(0).asString());
+        assertEquals(previousSearchCalls, searchCalls.get());
+        assertEquals(REPORT_QUOTE, trace.path("candidates").get(0).path("usedQuotes").get(0).asString());
+        assertFalse(traceResponse.body().contains("이 수치는 새빛시가 공개한 예산 자료를 근거로 보도했다."));
     }
 
     @Test void mixedReportsCountMatchingAndContradictingArticles() throws Exception {
@@ -193,6 +219,31 @@ class AnalysisApiIntegrationTests {
         assertEquals(ReportVerdict.CONTRADICTED, report.verdict());
         assertEquals(0, report.matchingCount());
         assertEquals(1, report.contradictingCount());
+    }
+
+    @Test void issuePipelinePublishesGroundedPerspectiveAndConflictTraceWithExistingResultContract() throws Exception {
+        scenario = "perspective";
+        Snapshot job = submitAndWait();
+        assertEquals(Status.COMPLETED, job.status());
+        CrossReport report = job.result().crossReports().getFirst();
+        assertEquals(ReportVerdict.MIXED, report.verdict());
+        assertEquals(1, report.matchingCount()); assertEquals(1, report.contradictingCount());
+        int callsBeforeRead = searchCalls.get();
+        JsonNode trace = json.readTree(get(job.analysisId() + "/cross-report/trace").body()).path("claims").get(0);
+        assertEquals(6, trace.path("searches").size());
+        assertEquals(ARTICLE_QUOTE, trace.path("issue").path("originalQuote").asString());
+        boolean found = false;
+        for (JsonNode c : trace.path("candidates")) if (c.path("url").asString().equals(REPORT2) && !c.path("evidenceId").isNull()) {
+            found = true;
+            assertEquals("CONFLICT_CANDIDATE", c.path("claimAnalysis").path("perspective").asString());
+            assertTrue(c.path("llmSelected").isNull());
+            assertTrue(c.path("verificationSelection").path("selected").asBoolean());
+            assertTrue(c.path("conflictResolution").path("accepted").asBoolean());
+            assertEquals(CONTRARY_QUOTE, c.path("usedQuotes").get(0).asString());
+            assertEquals("또다른일보", c.path("document").path("publisher").asString());
+        }
+        assertTrue(found); assertEquals(callsBeforeRead, searchCalls.get());
+        assertEquals(2, job.result().sourceAssessments().getFirst().sources().size());
     }
 
     @Test void failedCandidateFetchesContinueUntilTenthUniqueUrl() throws Exception {
@@ -309,6 +360,18 @@ class AnalysisApiIntegrationTests {
         Snapshot job = submitAndWait();
         assertEquals(Status.FAILED, job.status());
         assertEquals("ANALYSIS_FAILED", job.error().code());
+        var response = get(job.analysisId() + "/cross-report/trace");
+        assertEquals(200, response.statusCode());
+        JsonNode trace = json.readTree(response.body());
+        assertEquals("FAILED", trace.path("status").asString());
+        JsonNode claim = trace.path("claims").get(0);
+        assertEquals("새빛시 복지 예산 12% 감소", claim.path("exactQuery").asString());
+        assertEquals("SEARCH_FAILED", claim.path("failure").path("code").asString());
+        assertEquals(4, claim.path("searches").size());
+        for (JsonNode request : claim.path("searches")) assertEquals("FAILED", request.path("status").asString());
+        assertFalse(response.body().contains("test-openai"));
+        assertFalse(response.body().contains("test-secret"));
+        assertFalse(response.body().contains("test-brave"));
     }
 
     private Extraction extraction() {
@@ -324,7 +387,8 @@ class AnalysisApiIntegrationTests {
         if (scenario.equals("repeat-source"))
             sourceClaims.add(new DraftSourceClaim("두 번째 정보원 포함 주장", List.of(first)));
         List<DraftCrossClaim> reports = new ArrayList<>();
-        reports.add(new DraftCrossClaim(reportText, "새빛시 복지 예산 12% 감소", "새빛시 내년도 복지 예산 변화"));
+        reports.add(new DraftCrossClaim(reportText, "새빛시 복지 예산 12% 감소", "새빛시 내년도 복지 예산 변화",
+            scenario.equals("perspective") ? new IssueFrame("밝혔다", "새빛시", "복지 예산", "내년도", "복지 예산", ARTICLE_QUOTE) : null));
         if (scenario.equals("three-each")) {
             reports.add(new DraftCrossClaim("새빛시 복지 사업을 조정한다.", "새빛시 복지 사업 조정", "새빛시 사업 개편"));
             reports.add(new DraftCrossClaim("새빛시가 예산 자료를 공개했다.", "새빛시 예산 자료 공개", "새빛시 예산 발표"));

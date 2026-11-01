@@ -4,19 +4,33 @@ import java.util.List;
 import java.util.Map;
 
 import static org.argos.argos_backend.analysis.domain.AnalysisModels.*;
+import static org.argos.argos_backend.analysis.domain.ReportingModels.*;
 
 public final class LlmModels {
     private LlmModels() {}
 
-    public record DraftCrossClaim(String text, String exactQuery, String expandedQuery) {}
+    public record DraftCrossClaim(String text, String exactQuery, String expandedQuery, IssueFrame issue) {
+        public DraftCrossClaim(String text, String exactQuery, String expandedQuery) {
+            this(text, exactQuery, expandedQuery, null);
+        }
+    }
     public record DraftSource(String name, String affiliation, SourceType type, String citedInArticle,
                               boolean identifiable, String identityQuery, String quoteQuery) {}
     public record DraftSourceClaim(String text, List<DraftSource> sources) {}
     public record Extraction(List<DraftCrossClaim> crossReportClaims, List<DraftSourceClaim> sourceClaims) {}
     public record Quote(String evidenceId, String quote) {}
     public record ReportSelection(List<Quote> evidence) {}
+    public record PerspectiveSelection(List<CandidateClaim> candidates) {}
     public enum DecisionStance { MATCHES, CONTRADICTS, UNRELATED }
-    public record ReportDecision(String evidenceId, DecisionStance stance, String reason) {}
+    public record ReportDecision(String evidenceId, DecisionStance stance, String reason, ConflictCheck conflictCheck,
+                                 MatchCheck matchCheck) {
+        public ReportDecision(String evidenceId, DecisionStance stance, String reason, ConflictCheck conflictCheck) {
+            this(evidenceId, stance, reason, conflictCheck, null);
+        }
+        public ReportDecision(String evidenceId, DecisionStance stance, String reason) {
+            this(evidenceId, stance, reason, null, null);
+        }
+    }
     public record ReportReview(List<ReportDecision> comparisons) {}
     public record SourceSelection(List<Quote> evidence) {}
     public record Imvain(Criterion independent, Criterion multiple, Criterion verify, Criterion authoritative,
