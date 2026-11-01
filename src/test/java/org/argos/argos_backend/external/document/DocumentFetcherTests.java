@@ -39,6 +39,34 @@ class DocumentFetcherTests {
         assertTrue(doc.truncated());
         assertEquals(30000, doc.body().length());
     }
+    @Test void extractsPublisherAndAuthorFromNaverNewsHeader() throws Exception {
+        String html = """
+            <html><head><title>올해 수출 기사</title></head><body>
+            <a class="media_end_head_top_logo" href="https://www.yna.co.kr/">
+              <img alt="연합뉴스"><span class="media_end_head_top_press">연합뉴스</span>
+            </a>
+            <em class="media_end_head_journalist_name">신창용 기자</em>
+            <div id="dic_area">%s</div></body></html>
+            """.formatted("올해 수출에 관한 기사 본문입니다. ".repeat(10));
+        var doc = fetcher.parse("https://n.news.naver.com/mnews/article/001/0016413780?rc=N&ntype=RANKING",
+            "text/html", html.getBytes(StandardCharsets.UTF_8), true);
+        assertEquals("연합뉴스", doc.publisher());
+        assertEquals("신창용 기자", doc.author());
+    }
+    @Test void prefersNaverNewsHeaderOverPortalMetadata() throws Exception {
+        String html = """
+            <html><head><title>기사 제목</title><meta property="og:site_name" content="네이버 뉴스">
+            <script type="application/ld+json">{"@type":"NewsArticle","publisher":{"name":"네이버 뉴스"},
+            "author":{"name":"편집부"}}</script></head><body>
+            <a class="media_end_head_top_logo"><img alt="연합뉴스"></a>
+            <em class="media_end_head_journalist_name">신창용 기자</em>
+            <div id="dic_area">%s</div></body></html>
+            """.formatted("올해 수출에 관한 기사 본문입니다. ".repeat(10));
+        var doc = fetcher.parse("https://news.naver.com/article/001/0016413780", "text/html",
+            html.getBytes(StandardCharsets.UTF_8), true);
+        assertEquals("연합뉴스", doc.publisher());
+        assertEquals("신창용 기자", doc.author());
+    }
     @Test void unreadableArticleIsNotReplacedByNavigation() {
         assertThrows(AnalysisFailure.class, () -> parse("<html><head><title>로그인</title></head><body><nav>메뉴</nav><main>로그인이 필요합니다.</main></body></html>"));
     }

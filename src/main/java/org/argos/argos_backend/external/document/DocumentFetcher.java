@@ -88,8 +88,15 @@ public class DocumentFetcher {
             catch (RuntimeException ignored) { /* Invalid site metadata falls back to HTML. */ }
         }
         String title = first(field(news, "headline"), meta(html, "og:title"), html.select("h1").text(), html.title());
-        String publisher = first(nestedName(news, "publisher"), meta(html, "og:site_name"));
-        String author = first(nestedName(news, "author"), meta(html, "author"), html.select("[rel=author]").text());
+        String host = URI.create(url).getHost();
+        boolean naverNews = "news.naver.com".equalsIgnoreCase(host) || "n.news.naver.com".equalsIgnoreCase(host);
+        String publisher = first(
+            naverNews ? html.select(".media_end_head_top_press").text() : null,
+            naverNews ? html.select(".media_end_head_top_logo img").attr("alt") : null,
+            nestedName(news, "publisher"), meta(html, "og:site_name"));
+        String author = first(
+            naverNews ? html.select(".media_end_head_journalist_name").text() : null,
+            nestedName(news, "author"), meta(html, "author"), html.select("[rel=author]").text());
         Instant published = parseDate(first(field(news, "datePublished"), meta(html, "article:published_time"), meta(html, "date")));
         String jsonBody = first(field(news, "articleBody"));
         html.select("script,style,nav,header,footer,aside,form,[role=navigation],.advertisement,.ad,.related,.comments").remove();
