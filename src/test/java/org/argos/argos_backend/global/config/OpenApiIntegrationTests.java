@@ -25,7 +25,8 @@ class OpenApiIntegrationTests {
         assertEquals("ARGOS API", doc.path("info").path("title").asString());
         assertEquals("/", doc.path("servers").get(0).path("url").asString());
         JsonNode paths = doc.path("paths");
-        assertEquals(Set.of("/api/v1/analyses", "/api/v1/analyses/{analysisId}", "/api/v1/analyses/{analysisId}/result", "/api/v1/analyses/{analysisId}/cross-report/trace"), names(paths));
+        assertEquals(Set.of("/api/v1/analyses", "/api/v1/analyses/{analysisId}", "/api/v1/analyses/{analysisId}/result", "/api/v1/analyses/{analysisId}/cross-report/trace",
+            "/api/v1/demo/analyses", "/api/v1/demo/analyses/{analysisId}", "/api/v1/demo/analyses/{analysisId}/result"), names(paths));
         assertOperation(paths.path("/api/v1/analyses").path("post"), "createAnalysis", "뉴스 분석 요청", Set.of("202", "400", "415", "422", "429", "500", "503"));
         assertOperation(paths.path("/api/v1/analyses/{analysisId}").path("get"), "getAnalysisStatus", "분석 상태 조회", Set.of("200", "400", "404", "500"));
         assertOperation(paths.path("/api/v1/analyses/{analysisId}/result").path("get"), "getAnalysisResult", "분석 결과 조회", Set.of("200", "400", "404", "409", "500"));
