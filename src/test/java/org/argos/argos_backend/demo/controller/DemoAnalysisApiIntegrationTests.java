@@ -36,7 +36,7 @@ class DemoAnalysisApiIntegrationTests {
         when(clock.instant()).thenAnswer(invocation -> now.get());
     }
 
-    @Test void keepsRunningForFiveSecondsThenReturnsStaticResultWithMatchingId() throws Exception {
+    @Test void keepsRunningForThirtySecondsThenReturnsStaticResultWithMatchingId() throws Exception {
         HttpResponse<String> accepted = http.send(HttpRequest.newBuilder(base()).header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString("{\"articleUrl\":\"https://news.example.com/demo\"}"))
             .build(), HttpResponse.BodyHandlers.ofString());
@@ -52,7 +52,7 @@ class DemoAnalysisApiIntegrationTests {
         assertFalse(runningBody.path("activeStages").isEmpty());
         assertError(getPath(id + "/result"), 409, "ANALYSIS_NOT_READY");
 
-        now.set(now.get().plusSeconds(5));
+        now.set(now.get().plusSeconds(30));
         JsonNode completedStatus = json.readTree(get(id).body());
         assertEquals("COMPLETED", completedStatus.path("status").asString());
         assertTrue(completedStatus.path("activeStages").isEmpty());

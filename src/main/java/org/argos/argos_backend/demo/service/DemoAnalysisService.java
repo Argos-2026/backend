@@ -22,7 +22,7 @@ import tools.jackson.databind.node.ObjectNode;
 @Service
 public class DemoAnalysisService {
     private static final String RESULT_RESOURCE = "demo/analysis-result.json";
-    private static final Duration RUNNING_DURATION = Duration.ofSeconds(5);
+    private static final Duration RUNNING_DURATION = Duration.ofSeconds(30);
     private static final Duration RETENTION = Duration.ofMinutes(10);
 
     private final Clock clock;

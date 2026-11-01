@@ -15,10 +15,10 @@
 | Method | 경로 | 기능 |
 |---|---|---|
 | POST | `/api/v1/demo/analyses` | 더미 분석 접수 |
-| GET | `/api/v1/demo/analyses/{analysisId}` | 5초간 `RUNNING` 상태 조회 |
+| GET | `/api/v1/demo/analyses/{analysisId}` | 30초간 `RUNNING` 상태 조회 |
 | GET | `/api/v1/demo/analyses/{analysisId}/result` | 정적 결과 JSON 조회 |
 
-실제 분석 API와 같은 순서로 POST → 상태 폴링 → 결과 조회를 수행합니다. 더미 요청은 접수 후 정확히 5초 동안 `RUNNING`을 반환하고, 그 전에는 결과 API가 `409 ANALYSIS_NOT_READY`를 반환합니다. 결과 예시는 [analysis-result.json](src/main/resources/demo/analysis-result.json)에 있습니다.
+실제 분석 API와 같은 순서로 POST → 상태 폴링 → 결과 조회를 수행합니다. 더미 요청은 접수 후 정확히 30초 동안 `RUNNING`을 반환하고, 그 전에는 결과 API가 `409 ANALYSIS_NOT_READY`를 반환합니다. 결과 예시는 [analysis-result.json](src/main/resources/demo/analysis-result.json)에 있습니다.
 
 ## 프로젝트 구조
 
