@@ -97,7 +97,9 @@ public class DocumentFetcher {
         String author = first(
             naverNews ? html.select(".media_end_head_journalist_name").text() : null,
             nestedName(news, "author"), meta(html, "author"), html.select("[rel=author]").text());
-        Instant published = parseDate(first(field(news, "datePublished"), meta(html, "article:published_time"), meta(html, "date")));
+        Instant published = naverNews ? naverPublishedAt(html) : null;
+        if (published == null)
+            published = parseDate(first(field(news, "datePublished"), meta(html, "article:published_time"), meta(html, "date")));
         String jsonBody = first(field(news, "articleBody"));
         html.select("script,style,nav,header,footer,aside,form,[role=navigation],.advertisement,.ad,.related,.comments").remove();
         Element main = html.selectFirst("#dic_area,#newsct_article,#articleBodyContents,#articleBody,#article-body,[itemprop=articleBody],article,main");
@@ -135,6 +137,14 @@ public class DocumentFetcher {
     }
     public static String clean(String value) { return value.replace('\u00a0', ' ').replaceAll("\\s+", " ").strip(); }
     private String limit(String text) { return text.substring(0, Math.min(30000, text.length())); }
+    private Instant naverPublishedAt(org.jsoup.nodes.Document html) {
+        String value = html.select("._ARTICLE_DATE_TIME[data-date-time]").attr("data-date-time");
+        if (value.isBlank()) return null;
+        try {
+            return LocalDateTime.parse(value, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+                .atZone(ZoneId.of("Asia/Seoul")).toInstant();
+        } catch (RuntimeException ignored) { return null; }
+    }
     static Instant parseDate(String value) {
         if (value == null) return null;
         try { return Instant.parse(value); } catch (RuntimeException ignored) {}

@@ -46,12 +46,17 @@ class DocumentFetcherTests {
               <img alt="연합뉴스"><span class="media_end_head_top_press">연합뉴스</span>
             </a>
             <em class="media_end_head_journalist_name">신창용 기자</em>
+            <span class="media_end_head_info_datestamp_time _ARTICLE_DATE_TIME"
+                data-date-time="2026-11-01 10:35:42">2026.11.01. 오전 10:35</span>
+            <span class="media_end_head_info_datestamp_time _ARTICLE_MODIFY_DATE_TIME"
+                data-modify-date-time="2026-11-01 10:52:12">2026.11.01. 오전 10:52</span>
             <div id="dic_area">%s</div></body></html>
             """.formatted("올해 수출에 관한 기사 본문입니다. ".repeat(10));
         var doc = fetcher.parse("https://n.news.naver.com/mnews/article/001/0016413780?rc=N&ntype=RANKING",
             "text/html", html.getBytes(StandardCharsets.UTF_8), true);
         assertEquals("연합뉴스", doc.publisher());
         assertEquals("신창용 기자", doc.author());
+        assertEquals("2026-11-01T01:35:42Z", doc.publishedAt().toString());
     }
     @Test void prefersNaverNewsHeaderOverPortalMetadata() throws Exception {
         String html = """
