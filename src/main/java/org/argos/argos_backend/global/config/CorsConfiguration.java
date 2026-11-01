@@ -22,6 +22,8 @@ public class CorsConfiguration {
         var source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/api/v1/analyses", cors);
         source.registerCorsConfiguration("/api/v1/analyses/**", cors);
+        source.registerCorsConfiguration("/api/v1/demo/analyses", cors);
+        source.registerCorsConfiguration("/api/v1/demo/analyses/**", cors);
         var registration = new FilterRegistrationBean<>(new CorsFilter(source));
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
         return registration;
